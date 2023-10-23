@@ -68,6 +68,10 @@ def parse_element(encoded_value: str) -> tuple[int | str | list[int | str], str]
         return decode_string(encoded_value[:len_count]), encoded_value[len_count:]
     elif encoded_value[0] == "l":
         return decode_list(encoded_value), ""
+    elif encoded_value[0] == "d":
+        return decode_dictionaries(encoded_value), ""
+    else:
+        raise NotImplementedError(f"Unknown encoded value {encoded_value}")
 
 
 def decode_list(encoded_list: str) -> list[int | str]:
