@@ -1,7 +1,7 @@
 import json
 import sys
 
-from app.bencode import decode_string as decode_bencode
+from app.bencode import decode as decode_bencode
 
 
 def main():
