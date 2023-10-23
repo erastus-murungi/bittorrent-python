@@ -1,3 +1,5 @@
+from pprint import pprint
+
 from app.utils import check_state
 
 
@@ -34,12 +36,12 @@ def decode_string(encoded_string: str) -> str:
     """
     if isinstance(encoded_string, bytes):
         encoded_string = encoded_string.decode()
-    length, string = encoded_string.split(":")
+    length, string = encoded_string.split(":", maxsplit=1)
     decoded = string[: int(length)]
-    check_state(
-        len(decoded) == int(length),
-        "Length of decoded string does not match length in encoded string",
-    )
+    # check_state(
+    #     len(decoded) == int(length),
+    #     "Length of decoded string does not match length in encoded string",
+    # )
     return decoded
 
 
@@ -101,8 +103,22 @@ def decode_dictionaries(encoded_dict: str) -> dict[str, int | str | list[int | s
     return decoded_dict
 
 
+def parse_torrent(
+    torrent_filename: str | bytes,
+) -> dict[str, int | str | list[int | str]]:
+    torrent_filename = (
+        torrent_filename
+        if isinstance(torrent_filename, str)
+        else torrent_filename.decode()
+    )
+    with open(torrent_filename, "rb") as f:
+        encoded_dict = f.read().decode(errors="replace")
+        return decode_dictionaries(encoded_dict)
+
+
 if __name__ == "__main__":
     # import doctest
     #
     # doctest.testmod()
-    print(decode(b"d3:foo3:bar5:helloi52ee"))
+    # print(decode(b"d3:foo3:bar5:helloi52ee"))
+    pprint(parse_torrent(b"../sample.torrent"))
