@@ -19,6 +19,8 @@ def decode(encoded_value_bytes_or_str: bytes | str) -> str | int | list[int | st
         return decode_string(encoded_value)
     elif encoded_value[0] == "l":
         return decode_list(encoded_value)
+    elif encoded_value[0] == "d":
+        return decode_dictionaries(encoded_value)
     else:
         raise NotImplementedError(f"Unknown encoded value {encoded_value}")
 
@@ -57,6 +59,17 @@ def decode_integer(encoded_integer: str) -> int:
     return int(encoded_integer[1:-1])
 
 
+def parse_element(encoded_value: str) -> tuple[int | str | list[int | str], str]:
+    if encoded_value[0] == "i":
+        return parse_out_integer(encoded_value)
+    elif encoded_value[0].isdigit():
+        num_chars = encoded_value.split(":", 1)[0]
+        len_count = len(num_chars) + 1 + int(num_chars)
+        return decode_string(encoded_value[:len_count]), encoded_value[len_count:]
+    elif encoded_value[0] == "l":
+        return decode_list(encoded_value), ""
+
+
 def decode_list(encoded_list: str) -> list[int | str]:
     check_state(
         encoded_list[0] == "l" and encoded_list[-1] == "e",
@@ -65,25 +78,27 @@ def decode_list(encoded_list: str) -> list[int | str]:
     decoded_list = []
     encoded_value: str = encoded_list[1:-1]
     while encoded_value:
-        if encoded_value[0] == "i":
-            decoded_int, encoded_value = parse_out_integer(encoded_value)
-            decoded_list.append(decoded_int)
-        elif encoded_value[0].isdigit():
-            num_chars = encoded_value.split(":", 1)[0]
-            len_count = len(num_chars) + 1 + int(num_chars)
-            decoded_str, encoded_value = (
-                decode_string(encoded_value[:len_count]),
-                encoded_value[len_count:],
-            )
-            decoded_list.append(decoded_str)
-        elif encoded_value[0] == "l":
-            decoded_list.append(decode_list(encoded_value))
-            encoded_value = ""
+        decoded, encoded_value = parse_element(encoded_value)
+        decoded_list.append(decoded)
     return decoded_list
+
+
+def decode_dictionaries(encoded_dict: str) -> dict[str, int | str | list[int | str]]:
+    check_state(
+        encoded_dict[0] == "d" and encoded_dict[-1] == "e",
+        'Encoded dictionary must start with "d" and end with "e"',
+    )
+    decoded_dict = {}
+    encoded_value: str = encoded_dict[1:-1]
+    while encoded_value:
+        key, encoded_value = parse_element(encoded_value)
+        value, encoded_value = parse_element(encoded_value)
+        decoded_dict[key] = value
+    return decoded_dict
 
 
 if __name__ == "__main__":
     # import doctest
     #
     # doctest.testmod()
-    decode(b"l4:spam4:eggse")
+    print(decode(b"d3:foo3:bar5:helloi52ee"))
