@@ -79,7 +79,6 @@ def decode_list(encoded_list: str) -> list[int | str]:
         elif encoded_value[0] == "l":
             decoded_list.append(decode_list(encoded_value))
             encoded_value = ""
-        print(decoded_list, encoded_value)
     return decoded_list
 
 
