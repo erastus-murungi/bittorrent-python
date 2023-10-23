@@ -1,7 +1,7 @@
 import json
 import sys
 
-from app.bencode import bencode_decode, parse_torrent, calc_info_hash
+from app.bencode import bencode_decode, parse_torrent, calc_info_hash, get_piece_hashes
 
 
 def main():
@@ -23,8 +23,10 @@ def main():
         print(
             f'Tracker URL: {metainfo["announce"]}\n'
             f'Length: {metainfo["info"]["length"]}\n'
-            f"Info Hash: {calc_info_hash(metainfo)}"
+            f"Info Hash: {calc_info_hash(metainfo)}\n"
+            f"Piece Length: {metainfo['info']['piece length']}"
         )
+        print("Piece hashes: ", *get_piece_hashes(metainfo), sep="\n")
     else:
         raise NotImplementedError(f"Unknown command {command}")
 

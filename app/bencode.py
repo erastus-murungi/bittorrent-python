@@ -185,6 +185,15 @@ def calc_info_hash(meta_info: BEncodedDictionary):
     return hashlib.sha1(info_bytes).hexdigest()
 
 
+def get_piece_hashes(meta_info: BEncodedDictionary):
+    info: BEncodedDictionary = meta_info["info"]
+    pieces = info["pieces"]
+    piece_hashes = []
+    for i in range(0, len(pieces), 20):
+        piece_hashes.append(pieces[i : i + 20].encode("latin-1").hex())
+    return piece_hashes
+
+
 if __name__ == "__main__":
     # import doctest
     #
@@ -193,3 +202,4 @@ if __name__ == "__main__":
     metainfo = parse_torrent(b"../sample.torrent")
     pprint(metainfo)
     print(calc_info_hash(metainfo))
+    print(get_piece_hashes(metainfo))
