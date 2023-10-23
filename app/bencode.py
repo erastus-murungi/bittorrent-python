@@ -1,7 +1,13 @@
 from app.utils import check_state
 
 
-def decode(encoded_value_bytes_or_str: bytes | str) -> str | int:
+def parse_out_integer(encoded_str: str) -> tuple[int, str]:
+    check_state(encoded_str[0] == "i", "Encoded integer must start with 'i'")
+    int_end_index = encoded_str.index("e", 0)
+    return int(encoded_str[1:int_end_index]), encoded_str[int_end_index + 1 :]
+
+
+def decode(encoded_value_bytes_or_str: bytes | str) -> str | int | list[int | str]:
     encoded_value = (
         encoded_value_bytes_or_str.decode()
         if isinstance(encoded_value_bytes_or_str, bytes)
@@ -11,6 +17,8 @@ def decode(encoded_value_bytes_or_str: bytes | str) -> str | int:
         return decode_integer(encoded_value)
     elif encoded_value[0].isdigit():
         return decode_string(encoded_value)
+    elif encoded_value[0] == "l":
+        return decode_list(encoded_value)
     else:
         raise NotImplementedError(f"Unknown encoded value {encoded_value}")
 
@@ -47,3 +55,36 @@ def decode_integer(encoded_integer: str) -> int:
         "Encoded integer must start with 'i' and end with 'e'",
     )
     return int(encoded_integer[1:-1])
+
+
+def decode_list(encoded_list: str) -> list[int | str]:
+    check_state(
+        encoded_list[0] == "l" and encoded_list[-1] == "e",
+        'Encoded list must start with "l" and end with "e"',
+    )
+    decoded_list = []
+    encoded_value: str = encoded_list[1:-1]
+    while encoded_value:
+        if encoded_value[0] == "i":
+            decoded_int, encoded_value = parse_out_integer(encoded_value)
+            decoded_list.append(decoded_int)
+        elif encoded_value[0].isdigit():
+            num_chars = encoded_value.split(":", 1)[0]
+            len_count = len(num_chars) + 1 + int(num_chars)
+            decoded_str, encoded_value = (
+                decode_string(encoded_value[:len_count]),
+                encoded_value[len_count:],
+            )
+            decoded_list.append(decoded_str)
+        elif encoded_value[0] == "l":
+            decoded_list.append(decode_list(encoded_value))
+            encoded_value = ""
+        print(decoded_list, encoded_value)
+    return decoded_list
+
+
+if __name__ == "__main__":
+    # import doctest
+    #
+    # doctest.testmod()
+    decode(b"l4:spam4:eggse")
