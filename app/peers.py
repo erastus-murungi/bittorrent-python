@@ -1,10 +1,9 @@
-import hashlib
 from ipaddress import ip_address
 from pathlib import Path
 
 import requests
 
-from app.bencode import bencode_decode, bencode_encode
+from app.bencode import bencode_decode
 from app.models import (
     TorrentFile,
     Info,
@@ -70,21 +69,9 @@ def parse_torrent(
     )
 
 
-def calc_info_hash(meta_info: TorrentFile):
-    info = meta_info.info
-    info_bytes = bencode_encode(info.dict_)
-    return hashlib.sha1(info_bytes).hexdigest()
-
-
-def calc_info_hash_for_request(meta_info: TorrentFile) -> bytes:
-    info = meta_info.info
-    info_bytes = bencode_encode(info.dict_)
-    return hashlib.sha1(info_bytes).digest()
-
-
 def get_tracker_request_params(meta_info: TorrentFile) -> TrackerGetRequestParams:
     return {
-        "info_hash": calc_info_hash_for_request(meta_info),
+        "info_hash": meta_info.info.info_hash().digest(),
         "peer_id": "00112233445566778899",
         "port": 6881,
         "uploaded": 0,

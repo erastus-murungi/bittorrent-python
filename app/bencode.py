@@ -1,3 +1,6 @@
+import hashlib
+from dataclasses import dataclass
+
 from app.utils import check_state
 
 BEncodedInteger = int
@@ -160,6 +163,35 @@ def bencode_encode(value: BEncodedValue) -> bytes:
     b'd3:foo3:bar5:helloi52ee'
     """
     return BencodeParser().encode(value)
+
+
+@dataclass(slots=True)
+class Info:
+    # size of the file in bytes, for single-file torrents
+    length: int
+
+    # The name key maps to a UTF-8 encoded string which is the suggested name
+    # to save the file (or directory) as. It is purely advisory.
+    name: str
+
+    # piece length maps to the number of bytes in each piece the file is split into.
+    # For the purposes of transfer, files are split into fixed-size pieces which are all the same length
+    # except for possibly the last one which may be truncated.
+    # piece length is almost always a power of two, most commonly 2 18 = 256 K
+    # (BitTorrent prior to version 3.2 uses 2 20 = 1 M as default).
+    piece_length: int
+
+    # sha1 hashes of each piece
+    pieces: []
+
+    # The original dictionary, for debugging and idempotency purposes.
+    # This implementation does not implement key ordering checks yet.
+    # we use this so that we can be correct when re-encoding the info dictionary
+    dict_: BEncodedDictionary
+
+    def info_hash(self):
+        info_bytes = bencode_encode(self.dict_)
+        return hashlib.sha1(info_bytes)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,13 @@
 import json
 import sys
+from ipaddress import ip_address
 
 from app.bencode import (
     bencode_decode,
 )
-from app.peers import parse_torrent, calc_info_hash, discover_peers
+from app.handshake import create_tcp_handshake
+from app.models import HandShake
+from app.peers import parse_torrent, discover_peers
 
 PEER_NUM_BYTES = 6
 
@@ -29,7 +32,7 @@ def main():
         print(
             f"Tracker URL: {metainfo.announce}\n"
             f"Length: {metainfo.info.length}\n"
-            f"Info Hash: {calc_info_hash(metainfo)}\n"
+            f"Info Hash: {metainfo.info.info_hash().hexdigest()}\n"
             f"Piece Length: {metainfo.info.piece_length}"
         )
         print(
@@ -42,6 +45,20 @@ def main():
         metainfo = parse_torrent(torrent_file)
         tracker_info = discover_peers(metainfo)
         print("\n".join(f"{peer.ip}:{peer.port}" for peer in tracker_info.peers))
+    elif command == "handshake":
+        torrent_file = sys.argv[2].encode()
+        metainfo = parse_torrent(torrent_file)
+        # peer_ip = sys.argv[3].encode()
+        # peer_port = int(sys.argv[4])
+        peer_ip = ip_address("165.232.33.77")
+        peer_port = 51467
+        handshake = HandShake(
+            b"00112233445566778899", metainfo.info.info_hash().digest()
+        )
+        resp = create_tcp_handshake(peer_ip, peer_port, handshake)
+        peer_resp = HandShake.parse_from_response(resp)
+        print(f"Peer ID: {peer_resp.peer_id.hex()}")
+
     else:
         raise NotImplementedError(f"Unknown command {command}")
 

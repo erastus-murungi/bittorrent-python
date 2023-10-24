@@ -1,33 +1,9 @@
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv6Address
-from typing import Literal, ClassVar, TypedDict, NotRequired
+from typing import Literal, ClassVar, TypedDict, NotRequired, Final
 
-from app.bencode import BEncodedDictionary
-
-
-@dataclass(slots=True)
-class Info:
-    # size of the file in bytes, for single-file torrents
-    length: int
-
-    # The name key maps to a UTF-8 encoded string which is the suggested name
-    # to save the file (or directory) as. It is purely advisory.
-    name: str
-
-    # piece length maps to the number of bytes in each piece the file is split into.
-    # For the purposes of transfer, files are split into fixed-size pieces which are all the same length
-    # except for possibly the last one which may be truncated.
-    # piece length is almost always a power of two, most commonly 2 18 = 256 K
-    # (BitTorrent prior to version 3.2 uses 2 20 = 1 M as default).
-    piece_length: int
-
-    # sha1 hashes of each piece
-    pieces: []
-
-    # The original dictionary, for debugging and idempotency purposes.
-    # This implementation does not implement key ordering checks yet.
-    # we use this so that we can be correct when re-encoding the info dictionary
-    dict_: BEncodedDictionary
+from app.bencode import BEncodedDictionary, Info
+from app.utils import check_state
 
 
 class TrackerGetRequestParams(TypedDict):
@@ -108,3 +84,42 @@ class TorrentFile:
     info: Info
     # The original dictionary, for debugging and idempotency purposes
     dict_: BEncodedDictionary
+
+
+@dataclass(slots=True)
+class HandShake:
+    # pstr: string identifier of the protocol
+    peer_id: bytes
+    info_hash: bytes
+    reserved: bytes = 8 * b"\x00"
+    pstr: bytes = b"BitTorrent protocol"
+    pstrlen: Final[int] = 19
+
+    def __post_init__(self):
+        check_state(
+            len(self.pstr) == self.pstrlen, "pstrlen does not match pstr length"
+        )
+        check_state(len(self.reserved) == 8, "reserved does not match reserved length")
+        check_state(len(self.info_hash) == 20, "info_hash is not 20 bytes")
+        check_state(len(self.peer_id) == 20, "peer_id is not 20 bytes")
+
+    def to_str(self):
+        # handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
+        return (
+            self.pstrlen.to_bytes(1, "big")
+            + self.pstr
+            + self.reserved
+            + self.info_hash
+            + self.peer_id
+        )
+
+    @staticmethod
+    def parse_from_response(resp: bytes):
+        # handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
+        return HandShake(
+            peer_id=resp[48:68],
+            info_hash=resp[28:48],
+            reserved=resp[20:28],
+            pstr=resp[1:20],
+            pstrlen=int.from_bytes(resp[0:1], "big"),
+        )
