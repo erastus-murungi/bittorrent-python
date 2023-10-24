@@ -5,6 +5,7 @@ from ipaddress import ip_address
 from app.bencode import (
     bencode_decode,
 )
+from app.constants import PEER_ID
 from app.handshake import create_tcp_handshake
 from app.models import HandShake
 from app.peers import parse_torrent, discover_peers
@@ -53,9 +54,7 @@ def main():
         peer_port = int(peer_port_str)
         # peer_ip = ip_address("165.232.33.77")
         # peer_port = 51467
-        handshake = HandShake(
-            b"00112233445566778899", metainfo.info.info_hash().digest()
-        )
+        handshake = HandShake(PEER_ID, metainfo.info.info_hash().digest())
         resp = create_tcp_handshake(peer_ip, peer_port, handshake)
         peer_resp = HandShake.parse_from_response(resp)
         print(f"Peer ID: {peer_resp.peer_id.hex()}")
