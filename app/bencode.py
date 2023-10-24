@@ -5,6 +5,8 @@
 import hashlib
 from pathlib import Path
 
+import requests
+
 from app.utils import check_state
 
 #
@@ -259,6 +261,26 @@ def get_piece_hashes(meta_info: BEncodedDictionary):
     for i in range(0, len(pieces), 20):
         piece_hashes.append(pieces[i : i + 20].hex())
     return piece_hashes
+
+
+def discover_peers(torrent_filename: bytes | str):
+    meta_info = parse_torrent(torrent_filename)
+    tracker_response = requests.get(
+        meta_info["announce"].decode(),
+        params={
+            "info_hash": calc_info_hash_for_request(meta_info),
+            "peer_id": "00112233445566778899",
+            "port": 6881,
+            "uploaded": 0,
+            "downloaded": 0,
+            "left": meta_info["info"]["length"],
+            "compact": 1,
+        },
+    )
+    tracker_info = bencode_decode(tracker_response.content)
+    check_state("interval" in tracker_info, "No interval in response")
+    check_state("peers" in tracker_info, "No peers in response")
+    return tracker_info
 
 
 if __name__ == "__main__":
