@@ -1,78 +1,10 @@
-# import hashlib
-# from pathlib import Path
-# from pprint import pprint
-#
-import hashlib
-from pathlib import Path
-
-import requests
-
 from app.utils import check_state
 
-#
 BEncodedInteger = int
 BEncodedString = bytes
 BEncodedList = list[BEncodedInteger | BEncodedString]
 BEncodedDictionary = dict[str, BEncodedInteger | BEncodedString | BEncodedList]
 BEncodedValue = BEncodedInteger | BEncodedString | BEncodedList | BEncodedDictionary
-
-
-#
-#
-
-#
-#
-# #
-# #
-# # def pprint_metainfo(encoded_value: str):
-# #     pprint(decode_dict(encoded_value))
-#
-#
-# MY_PEER_ID = "DFYUIWdBtmfTePjL6adX"
-# MY_PORT = 6881
-#
-#
-# # def discover_peers(meta_info: BEncodedDictionary):
-# #     tracker_url = meta_info["announce"]
-# #     response = requests.get(
-# #         tracker_url,
-# #         params={
-# #             "info_hash": calc_info_hash_for_request(meta_info),
-# #             "peer_id": "00112233445566778899",
-# #             "port": MY_PORT,
-# #             "uploaded": 0,
-# #             "downloaded": 0,
-# #             "left": meta_info["info"]["length"],
-# #             "compact": 1,
-# #         },
-# #     )
-# #
-# #     tracker_response1 = decode_dict(response.text)
-# #     tracker_response2 = bencodepy.decode(response.content)
-# #     print(tracker_response1["peers"].encode(response.encoding))
-# #     print(tracker_response2[b"peers"])
-# #     assert (
-# #         tracker_response1["peers"].encode(response.encoding)
-# #         == tracker_response2[b"peers"]
-# #     )
-# #     pprint(tracker_response1)
-# #     pprint(tracker_response2)
-# # check_state(b"interval" in tracker_response, "No interval in response")
-# # check_state(b"peers" in tracker_response, "No peers in response")
-# # peers = tracker_response[b"peers"]
-# # check_state(len(peers) % 6 == 0, "Peers length is not a multiple of 6")
-# # for i in range(0, len(peers), 6):
-# #     peer_info = peers[i : i + 6]
-# #     ip = ip_address(int.from_bytes(peer_info[:4], byteorder="big", signed=False))
-# #     port = int.from_bytes(peer_info[4:], byteorder="big", signed=False)
-# #     print(f"{ip}:{port}")
-#
-#
-
-
-from typing import Generator, TypeAlias
-
-BCGen: TypeAlias = Generator[bytes, None, bool]
 
 
 class BencodeParser:
@@ -228,59 +160,6 @@ def bencode_encode(value: BEncodedValue) -> bytes:
     b'd3:foo3:bar5:helloi52ee'
     """
     return BencodeParser().encode(value)
-
-
-def parse_torrent(
-    torrent_filename: str | bytes,
-) -> BEncodedDictionary:
-    torrent_filename = (
-        torrent_filename
-        if isinstance(torrent_filename, str)
-        else torrent_filename.decode()
-    )
-    encoded_dict = Path(torrent_filename).read_bytes()
-    return BencodeParser().decode(encoded_dict)
-
-
-def calc_info_hash(meta_info: BEncodedDictionary):
-    info = meta_info["info"]
-    info_bytes = bencode_encode(info)
-    return hashlib.sha1(info_bytes).hexdigest()
-
-
-def calc_info_hash_for_request(meta_info: BEncodedDictionary):
-    info = meta_info["info"]
-    info_bytes = bencode_encode(info)
-    return hashlib.sha1(info_bytes).digest()
-
-
-def get_piece_hashes(meta_info: BEncodedDictionary):
-    info: BEncodedDictionary = meta_info["info"]
-    pieces = info["pieces"]
-    piece_hashes = []
-    for i in range(0, len(pieces), 20):
-        piece_hashes.append(pieces[i : i + 20].hex())
-    return piece_hashes
-
-
-def discover_peers(torrent_filename: bytes | str):
-    meta_info = parse_torrent(torrent_filename)
-    tracker_response = requests.get(
-        meta_info["announce"].decode(),
-        params={
-            "info_hash": calc_info_hash_for_request(meta_info),
-            "peer_id": "00112233445566778899",
-            "port": 6881,
-            "uploaded": 0,
-            "downloaded": 0,
-            "left": meta_info["info"]["length"],
-            "compact": 1,
-        },
-    )
-    tracker_info = bencode_decode(tracker_response.content)
-    check_state("interval" in tracker_info, "No interval in response")
-    check_state("peers" in tracker_info, "No peers in response")
-    return tracker_info
 
 
 if __name__ == "__main__":

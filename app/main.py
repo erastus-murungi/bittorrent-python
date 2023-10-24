@@ -1,15 +1,10 @@
-import ipaddress
 import json
 import sys
 
 from app.bencode import (
     bencode_decode,
-    parse_torrent,
-    calc_info_hash,
-    get_piece_hashes,
-    discover_peers,
 )
-from app.utils import check_state
+from app.peers import parse_torrent, calc_info_hash, discover_peers
 
 PEER_NUM_BYTES = 6
 
@@ -32,24 +27,21 @@ def main():
         torrent_file = sys.argv[2].encode()
         metainfo = parse_torrent(torrent_file)
         print(
-            f'Tracker URL: {metainfo["announce"].decode()}\n'
-            f'Length: {metainfo["info"]["length"]}\n'
+            f"Tracker URL: {metainfo.announce}\n"
+            f"Length: {metainfo.info.length}\n"
             f"Info Hash: {calc_info_hash(metainfo)}\n"
-            f"Piece Length: {metainfo['info']['piece length']}"
+            f"Piece Length: {metainfo.info.piece_length}"
         )
-        print("Piece hashes: ", *get_piece_hashes(metainfo), sep="\n")
+        print(
+            "Piece hashes: ",
+            *[piece_hash.hex() for piece_hash in metainfo.info.pieces],
+            sep="\n",
+        )
     elif command == "peers":
         torrent_file = sys.argv[2].encode()
-        tracker_info = discover_peers(torrent_file)
-        peers = tracker_info["peers"]
-        check_state(
-            len(peers) % PEER_NUM_BYTES == 0, "Peers length is not a multiple of 6"
-        )
-        for i in range(0, len(peers), PEER_NUM_BYTES):
-            peer_info = peers[i : i + PEER_NUM_BYTES]
-            peer_ip = ipaddress.ip_address(peer_info[:4])
-            peer_port: int = int.from_bytes(peer_info[4:], "big", signed=False)
-            print(f"{peer_ip}:{peer_port}")
+        metainfo = parse_torrent(torrent_file)
+        tracker_info = discover_peers(metainfo)
+        print("\n".join(f"{peer.ip}:{peer.port}" for peer in tracker_info.peers))
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
