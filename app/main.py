@@ -48,10 +48,11 @@ def main():
     elif command == "handshake":
         torrent_file = sys.argv[2].encode()
         metainfo = parse_torrent(torrent_file)
-        # peer_ip = sys.argv[3].encode()
-        # peer_port = int(sys.argv[4])
-        peer_ip = ip_address("165.232.33.77")
-        peer_port = 51467
+        peer_ip_str, peer_port_str = sys.argv[3].split(":", maxsplit=1)
+        peer_ip = ip_address(peer_ip_str)
+        peer_port = int(peer_port_str)
+        # peer_ip = ip_address("165.232.33.77")
+        # peer_port = 51467
         handshake = HandShake(
             b"00112233445566778899", metainfo.info.info_hash().digest()
         )
