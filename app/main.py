@@ -21,7 +21,7 @@ def main():
         torrent_file = sys.argv[2].encode()
         metainfo = parse_torrent(torrent_file)
         print(
-            f'Tracker URL: {metainfo["announce"]}\n'
+            f'Tracker URL: {metainfo["announce"].decode()}\n'
             f'Length: {metainfo["info"]["length"]}\n'
             f"Info Hash: {calc_info_hash(metainfo)}\n"
             f"Piece Length: {metainfo['info']['piece length']}"
