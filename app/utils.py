@@ -8,11 +8,14 @@ def check_state(condition: bool, error_message: str) -> None:
     return None
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s : %(thread)d : %(levelname)s - %(message)s",
+    stream=sys.stderr,
+)
+
+
 def log(message: str) -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s : %(thread)d : %(levelname)s - %(message)s",
-        stream=sys.stderr,
-    )
-    logging.info(message)
+    # logging.info(message)
+    # print(message, file=sys.stderr)
     return None

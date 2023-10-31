@@ -1,9 +1,12 @@
-import struct
 from dataclasses import dataclass
-from ipaddress import IPv4Address, IPv6Address
-from typing import Literal, ClassVar, TypedDict, NotRequired, Final
+from ipaddress import IPv4Address, IPv6Address, ip_address
+from typing import Literal, ClassVar, TypedDict, NotRequired
+from urllib.parse import urlencode
 
-from app.bencode import BEncodedDictionary, Info
+import aiohttp
+
+from app.bencode import BEncodedDictionary, Info, bencode_decode
+from app.constants import PEER_ID
 from app.utils import check_state
 
 
@@ -22,7 +25,7 @@ class TrackerGetRequestParams(TypedDict):
     # A string of length 20 which this downloader uses as its id.
     # Each downloader generates its own id at random at the start of a new download.
     # This value will also almost certainly have to be escaped.
-    peer_id: str
+    peer_id: bytes
 
     # The port number this peer is listening on.
     # Common behavior is for a downloader to try to listen on port 6881 and if that port
@@ -49,8 +52,10 @@ class TrackerGetRequestParams(TypedDict):
     # Generally used for the origin if it's on the same machine as the tracker.
     ip: NotRequired[IPv4Address | IPv6Address]
 
+    event: NotRequired[Literal["started", "completed", "stopped"]]
 
-@dataclass(slots=True)
+
+@dataclass(slots=True, frozen=True)
 class Peer:
     ip: IPv4Address | IPv6Address
     port: int
@@ -58,6 +63,9 @@ class Peer:
     NUM_BYTES_IN_PEER: ClassVar[int] = 6
     NUM_BYTES_IN_IP: ClassVar[int] = 4
     NUM_BYTES_IN_PORT: ClassVar[int] = 2
+
+    def __str__(self):
+        return f"{self.ip}:{self.port}"
 
 
 @dataclass(slots=True)
@@ -78,7 +86,7 @@ class TrackerGetResponse:
 
 
 @dataclass(slots=True)
-class TorrentFile:
+class Torrent:
     # The URL of the tracker.
     announce: str
     # The info of the torrent
@@ -86,45 +94,70 @@ class TorrentFile:
     # The original dictionary, for debugging and idempotency purposes
     dict_: BEncodedDictionary
 
+    async def get_peers(self) -> list[Peer]:
+        pass
 
-@dataclass(slots=True)
-class HandShake:
-    # pstr: string identifier of the protocol
-    peer_id: bytes
-    info_hash: bytes
-    reserved: bytes = 8 * b"\x00"
-    pstr: bytes = b"BitTorrent protocol"
-    pstrlen: Final[int] = 19
+    def _get_tracker_request_params(
+        self, first: bool = False, uploaded: int = 0, downloaded: int = 0
+    ) -> TrackerGetRequestParams:
+        req_params = {
+            "info_hash": self.info.info_hash().digest(),
+            "peer_id": PEER_ID,
+            "port": 6881,
+            "uploaded": uploaded,
+            "downloaded": downloaded,
+            "left": self.info.length,
+            "compact": 1,
+        }
+        if first:
+            req_params["event"] = "started"
+        return req_params
 
-    def __post_init__(self):
-        check_state(
-            len(self.pstr) == self.pstrlen, "pstrlen does not match pstr length"
-        )
-        check_state(len(self.reserved) == 8, "reserved does not match reserved length")
-        check_state(len(self.info_hash) == 20, "info_hash is not 20 bytes")
-        check_state(len(self.peer_id) == 20, "peer_id is not 20 bytes")
+    async def discover_peers(
+        self, first: bool = False, uploaded: int = 0, downloaded: int = 0
+    ) -> TrackerGetResponse:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                self.announce
+                + "?"
+                + urlencode(
+                    self._get_tracker_request_params(first, uploaded, downloaded)
+                )
+            ) as tracker_response:
+                if tracker_response.status != 200:
+                    raise ConnectionError(
+                        f"Tracker returned status code {tracker_response.status}"
+                    )
+                tracker_content = await tracker_response.read()
+                tracker_info = bencode_decode(tracker_content)
+                if "failure reason" in tracker_info:
+                    raise ValueError(
+                        f'Failure reason: {tracker_info["failure reason"].decode()}'
+                    )
+                check_state("interval" in tracker_info, "No interval in response")
+                check_state("peers" in tracker_info, "No peers in response")
 
-    def to_str(self):
-        # handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
-        # return (
-        #     self.pstrlen.to_bytes(1, "big")
-        #     + self.pstr
-        #     + self.reserved
-        #     + self.info_hash
-        #     + self.peer_id
-        # )
+                interval = tracker_info["interval"]
+                check_state(interval > 0, "Interval is not a positive integer")
+                peer_str = tracker_info["peers"]
+                check_state(
+                    len(peer_str) % Peer.NUM_BYTES_IN_PEER == 0,
+                    f"Peers length is not a multiple of {Peer.NUM_BYTES_IN_PEER}",
+                )
 
-        return struct.pack(
-            ">B19s8x20s20s", self.pstrlen, self.pstr, self.info_hash, self.peer_id
-        )
+                peers = []
+                for i in range(0, len(peer_str), Peer.NUM_BYTES_IN_PEER):
+                    peer_info = peer_str[i : i + Peer.NUM_BYTES_IN_PEER]
+                    peer_ip = ip_address(peer_info[: Peer.NUM_BYTES_IN_IP])
+                    peer_port = int.from_bytes(
+                        peer_info[Peer.NUM_BYTES_IN_IP :], "big", signed=False
+                    )
+                    peers.append(Peer(peer_ip, peer_port))
 
-    @staticmethod
-    def parse_from_response(resp: bytes):
-        # handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
-        return HandShake(
-            peer_id=resp[48:68],
-            info_hash=resp[28:48],
-            reserved=resp[20:28],
-            pstr=resp[1:20],
-            pstrlen=int.from_bytes(resp[0:1], "big"),
-        )
+                return TrackerGetResponse(
+                    interval=interval,
+                    complete=tracker_info["complete"],
+                    incomplete=tracker_info["incomplete"],
+                    peers=peers,
+                    dict_=tracker_info,
+                )
