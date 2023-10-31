@@ -1,3 +1,4 @@
+import struct
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv6Address
 from typing import Literal, ClassVar, TypedDict, NotRequired, Final
@@ -105,12 +106,16 @@ class HandShake:
 
     def to_str(self):
         # handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
-        return (
-            self.pstrlen.to_bytes(1, "big")
-            + self.pstr
-            + self.reserved
-            + self.info_hash
-            + self.peer_id
+        # return (
+        #     self.pstrlen.to_bytes(1, "big")
+        #     + self.pstr
+        #     + self.reserved
+        #     + self.info_hash
+        #     + self.peer_id
+        # )
+
+        return struct.pack(
+            ">B19s8x20s20s", self.pstrlen, self.pstr, self.info_hash, self.peer_id
         )
 
     @staticmethod

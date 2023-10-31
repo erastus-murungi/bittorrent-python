@@ -1,9 +1,10 @@
 from ipaddress import ip_address
 from pathlib import Path
 
-import requests
+import aiohttp
 
 from app.bencode import bencode_decode
+from app.constants import PEER_ID
 from app.models import (
     TorrentFile,
     Info,
@@ -72,7 +73,7 @@ def parse_torrent(
 def get_tracker_request_params(meta_info: TorrentFile) -> TrackerGetRequestParams:
     return {
         "info_hash": meta_info.info.info_hash().digest(),
-        "peer_id": "00112233445566778899",
+        "peer_id": f"{PEER_ID}",
         "port": 6881,
         "uploaded": 0,
         "downloaded": 0,
@@ -81,36 +82,37 @@ def get_tracker_request_params(meta_info: TorrentFile) -> TrackerGetRequestParam
     }
 
 
-def discover_peers(torrent_file: TorrentFile) -> TrackerGetResponse:
-    tracker_response = requests.get(
-        torrent_file.announce,
-        params=get_tracker_request_params(torrent_file),
-    )
-    tracker_info = bencode_decode(tracker_response.content)
-    check_state("interval" in tracker_info, "No interval in response")
-    check_state("peers" in tracker_info, "No peers in response")
+async def discover_peers(torrent_file: TorrentFile) -> TrackerGetResponse:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            torrent_file.announce, params=get_tracker_request_params(torrent_file)
+        ) as tracker_response:
+            tracker_content = await tracker_response.content.read()
+            tracker_info = bencode_decode(tracker_content)
+            check_state("interval" in tracker_info, "No interval in response")
+            check_state("peers" in tracker_info, "No peers in response")
 
-    interval = tracker_info["interval"]
-    check_state(interval > 0, "Interval is not a positive integer")
-    peer_str = tracker_info["peers"]
-    check_state(
-        len(peer_str) % Peer.NUM_BYTES_IN_PEER == 0,
-        f"Peers length is not a multiple of {Peer.NUM_BYTES_IN_PEER}",
-    )
+            interval = tracker_info["interval"]
+            check_state(interval > 0, "Interval is not a positive integer")
+            peer_str = tracker_info["peers"]
+            check_state(
+                len(peer_str) % Peer.NUM_BYTES_IN_PEER == 0,
+                f"Peers length is not a multiple of {Peer.NUM_BYTES_IN_PEER}",
+            )
 
-    peers = []
-    for i in range(0, len(peer_str), Peer.NUM_BYTES_IN_PEER):
-        peer_info = peer_str[i : i + Peer.NUM_BYTES_IN_PEER]
-        peer_ip = ip_address(peer_info[: Peer.NUM_BYTES_IN_IP])
-        peer_port = int.from_bytes(
-            peer_info[Peer.NUM_BYTES_IN_IP :], "big", signed=False
-        )
-        peers.append(Peer(peer_ip, peer_port))
+            peers = []
+            for i in range(0, len(peer_str), Peer.NUM_BYTES_IN_PEER):
+                peer_info = peer_str[i : i + Peer.NUM_BYTES_IN_PEER]
+                peer_ip = ip_address(peer_info[: Peer.NUM_BYTES_IN_IP])
+                peer_port = int.from_bytes(
+                    peer_info[Peer.NUM_BYTES_IN_IP :], "big", signed=False
+                )
+                peers.append(Peer(peer_ip, peer_port))
 
-    return TrackerGetResponse(
-        interval=interval,
-        complete=tracker_info["complete"],
-        incomplete=tracker_info["incomplete"],
-        peers=peers,
-        dict_=tracker_info,
-    )
+            return TrackerGetResponse(
+                interval=interval,
+                complete=tracker_info["complete"],
+                incomplete=tracker_info["incomplete"],
+                peers=peers,
+                dict_=tracker_info,
+            )

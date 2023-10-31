@@ -1,38 +1,29 @@
-import socket
-import sys
+import asyncio
 from ipaddress import IPv4Address, IPv6Address
 
 from app.models import HandShake
+from app.utils import log
 
 IPAddress = IPv4Address | IPv6Address
 
 
-def create_tcp_handshake(server_ip: IPAddress, server_port: int, handshake: HandShake):
-    # Create a TCP/IP socket
-    socket_obj = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    # Connect the socket to the port where the server is listening
-    server_address = (str(server_ip), server_port)
-    print(f"Connecting to {server_ip} port {server_port}", file=sys.stderr)
-    socket_obj.connect(server_address)
-
-    resp = b""
+async def _download(server_ip: IPAddress, server_port: int, handshake: HandShake):
     try:
-        # Send data
-        message = handshake.to_str()
-        print(f"Sending {message}", file=sys.stderr)
-        socket_obj.sendall(message)
+        reader, writer = await asyncio.open_connection(str(server_ip), server_port)
+        writer.write(handshake.to_str())
+        await writer.drain()
 
-        # Look for the response
-        amount_received = 0
-        amount_expected = len(message)
+        data = await reader.read(68)
 
-        while amount_received < amount_expected:
-            data = socket_obj.recv(1024)
-            amount_received += len(data)
-            resp += data
+        # ensure the handshake is valid
+        peer_handshake = HandShake.parse_from_response(data)
+        if peer_handshake.info_hash != handshake.info_hash:
+            raise ValueError("Peer sent invalid info hash")
+        if peer_handshake.peer_id == handshake.peer_id:
+            raise ValueError("Peer sent invalid peer id")
 
-    finally:
-        print("Closing socket", file=sys.stderr)
-        socket_obj.close()
-        return resp
+        log(f"Handshake successful with peer {server_ip}:{server_port}")
+
+        # send an interested message
+    except Exception as e:
+        log(f"Failed to connect to {server_ip}:{server_port} with exception {e}")
