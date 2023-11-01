@@ -5,8 +5,6 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Final
 
-from app.utils import check_state
-
 
 @dataclass
 class PeerMessage:
@@ -231,12 +229,11 @@ class HandShake:
     pstrlen: Final[int] = 19
 
     def __post_init__(self):
-        check_state(
-            len(self.pstr) == self.pstrlen, "pstrlen does not match pstr length"
-        )
-        check_state(len(self.reserved) == 8, "reserved does not match reserved length")
-        check_state(len(self.info_hash) == 20, "info_hash is not 20 bytes")
-        check_state(len(self.peer_id) == 20, "peer_id is not 20 bytes")
+        assert len(self.pstr) == self.pstrlen, "pstrlen does not match pstr length"
+
+        assert len(self.reserved) == 8, "reserved does not match reserved length"
+        assert len(self.info_hash) == 20, "info_hash is not 20 bytes"
+        assert len(self.peer_id) == 20, "peer_id is not 20 bytes"
 
     def pack(self):
         # handshake: <pstrlen><pstr><reserved><info_hash><peer_id>

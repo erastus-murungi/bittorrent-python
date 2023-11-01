@@ -10,8 +10,7 @@ import click
 from app.bencode import (
     bencode_decode,
 )
-from app.client import Client
-from app.models import Peer
+from app.client import Client, Peer
 
 PEER_NUM_BYTES = 6
 
