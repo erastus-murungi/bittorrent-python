@@ -17,7 +17,7 @@ class PeerMessage(ABC):
     Attributes:
         len (int): The length prefix is a four byte big-endian value.
                    It represents the length of the message, not including the length prefix itself.
-        id (int): ID of the message.
+        id (int) : ID of the message.
     """
 
     len: int
@@ -57,7 +57,7 @@ class FixedLengthPeerMessage(PeerMessage, ABC):
 @dataclass
 class KeepAlive(FixedLengthPeerMessage):
     """
-    Keep-alive messages with length prefix set to zero are periodically sent to maintain the connection alive.
+    Keep-alive messages with length prefix set to zero are periodically (usually 2 minutes) sent to maintain the connection alive.
 
     BitTorrent Specification:
     keep-alive: <len=0000>
@@ -162,7 +162,7 @@ class NotInterested(FixedLengthPeerMessage):
 @dataclass(kw_only=True)
 class Have(PeerMessage):
     """
-    The "have" message is used to tell the peer that the sender has downloaded a piece.
+    The "have" message is used by a peer to say that it has a specific piece.
 
     BitTorrent Specification:
     have: <len=0005><id=4><piece index>
@@ -319,6 +319,7 @@ class HandShake:
     BitTorrent Specification:
     handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
     """
+
     peer_id: bytes
     info_hash: bytes
     reserved: bytes = 8 * b"\x00"
