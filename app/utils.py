@@ -16,6 +16,6 @@ logging.basicConfig(
 
 
 def log(message: str) -> None:
-    # logging.info(message)
+    logging.info(message)
     # print(message, file=sys.stderr)
     return None

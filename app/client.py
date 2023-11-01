@@ -36,6 +36,11 @@ from app.utils import log
 IPAddress = IPv4Address | IPv6Address
 
 
+class DownloadFinishedEarly(StopAsyncIteration):
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
 class BlockState(IntEnum):
     PENDING = 1
     RECEIVED = 2
@@ -100,7 +105,13 @@ class PendingBlockRequest:
 
 
 class PieceManager:
-    def __init__(self, torrent_file: Torrent, max_pending_time_ms: int = 60_000):
+    def __init__(
+        self,
+        torrent_file: Torrent,
+        *,
+        max_pending_time_ms: int = 60_000,
+        piece_indices: tuple[int, ...] = None,
+    ):
         self.block_queue = asyncio.Queue[tuple[Peer, Piece]]()
         self.torrent_file = torrent_file
 
@@ -110,16 +121,17 @@ class PieceManager:
         self.pending_block_requests: dict[
             Peer, dict[int, PendingBlockRequest]
         ] = defaultdict(dict)
-        self.pieces: list[OnePiece] = self._init_pieces()
+        self.completed_pieces: list[OnePiece] = []
+        self.pieces: list[OnePiece] = self._init_pieces(piece_indices)
         self.max_pending_time_ns = max_pending_time_ms * 1_000_000
         self.abort = False
         self.future = asyncio.ensure_future(self.save_block())
-        self.completed_pieces: list[OnePiece] = []
+        self.piece_indices = piece_indices
 
     def close(self):
         self.abort = True
 
-    def _init_pieces(self) -> list[OnePiece]:
+    def _init_pieces(self, piece_indices: tuple[int, ...] = None) -> list[OnePiece]:
         pieces = []
         num_blocks_in_piece = ceil(self.torrent_file.info.piece_length / BLOCK_SIZE)
         for piece_index, sha1_hash in enumerate(self.torrent_file.info.pieces):
@@ -144,6 +156,13 @@ class PieceManager:
                     piece_index, self.torrent_file.info.piece_length, blocks, sha1_hash
                 )
             )
+        if piece_indices:
+            for piece_index, piece in enumerate(pieces):
+                if piece_index not in piece_indices:
+                    for block in piece:
+                        block.state = BlockState.RECEIVED
+                if piece.is_complete():
+                    self.completed_pieces.append(piece)
         return pieces
 
     def update_pieces_from_peer(self, peer: Peer, bitfield: bytes) -> None:
@@ -477,8 +496,8 @@ class Client:
         self.torrent = self.parse_torrent_file(file_content)
         self.available_peers: asyncio.Queue[Peer] = asyncio.Queue()
         self.peer_connections: list[PeerConnection] = []
-        self.piece_manager: PieceManager = PieceManager(self.torrent)
         self.abort = False
+        self.piece_manager: PieceManager | None = None
 
     @staticmethod
     async def perform_handshake(peer: Peer, info_hash) -> HandShake:
@@ -565,7 +584,8 @@ class Client:
             dict_=metainfo_dict,
         )
 
-    async def start(self):
+    async def start(self, piece_indices: tuple[int, ...] = None):
+        self.piece_manager = PieceManager(self.torrent, piece_indices=piece_indices)
         self.peer_connections = [
             PeerConnection(self.torrent, self.available_peers, self.piece_manager)
             for _ in range(self.max_peer_connections)
@@ -576,35 +596,39 @@ class Client:
         # Default interval between announce calls (in seconds)
         interval = 30 * 60
 
-        while True:
-            if self.piece_manager.download_completed():
-                log(f"{self.torrent.info.name} fully downloaded!")
-                log(f"Downloaded {self.piece_manager.bytes_downloaded} bytes")
-                log(f"{self.get_downloaded_data().decode()}")
-                break
-            if self.abort:
-                log("Aborting download...")
-                break
+        try:
+            while True:
+                if self.piece_manager.download_completed():
+                    log(f"{self.torrent.info.name} fully downloaded!")
+                    log(f"Downloaded {self.piece_manager.bytes_downloaded} bytes")
+                    log(f"{self.get_downloaded_data().decode()}")
+                    break
+                if self.abort:
+                    log("Aborting download...")
+                    break
 
-            current = time.monotonic()
-            if (not previous) or (previous + interval < current):
-                response = await self.torrent.discover_peers(
-                    first=previous if previous else False,
-                    uploaded=self.piece_manager.bytes_uploaded,
-                    downloaded=self.piece_manager.bytes_downloaded,
-                )
+                current = time.monotonic()
+                if (not previous) or (previous + interval < current):
+                    response = await self.torrent.discover_peers(
+                        first=previous if previous else False,
+                        uploaded=self.piece_manager.bytes_uploaded,
+                        downloaded=self.piece_manager.bytes_downloaded,
+                    )
 
-                if response:
-                    previous = current
-                    interval = response.interval
-                    self._empty_queue()
-                    for peer in response.peers:
-                        log(f"Adding peer {peer} to queue")
-                        self.available_peers.put_nowait(peer)
-            else:
-                await asyncio.sleep(5)
-        self.stop()
-        return self.piece_manager.completed_pieces
+                    if response:
+                        previous = current
+                        interval = response.interval
+                        self._empty_queue()
+                        for peer in response.peers:
+                            log(f"Adding peer {peer} to queue")
+                            self.available_peers.put_nowait(peer)
+                else:
+                    await asyncio.sleep(5)
+            self.stop()
+            return self.piece_manager.completed_pieces
+        except DownloadFinishedEarly:
+            self.stop()
+            return self.piece_manager.completed_pieces
 
     def _empty_queue(self):
         while not self.available_peers.empty():

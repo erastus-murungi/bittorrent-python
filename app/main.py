@@ -31,9 +31,10 @@ async def async_download_piece(
     piece_index: int,
 ):
     client = Client(file_content=file_content)
-    await client.start()
+    await client.start((piece_index,))
     output_file.write(client.piece_manager.pieces[piece_index].get_data())
     print(f"Piece {piece_index} downloaded to {output_file.name}")
+    return None
 
 
 async def async_download_full_file(
