@@ -600,8 +600,6 @@ class Client:
             while True:
                 if self.piece_manager.download_completed():
                     log(f"{self.torrent.info.name} fully downloaded!")
-                    log(f"Downloaded {self.piece_manager.bytes_downloaded} bytes")
-                    log(f"{self.get_downloaded_data().decode()}")
                     break
                 if self.abort:
                     log("Aborting download...")
@@ -623,7 +621,7 @@ class Client:
                             log(f"Adding peer {peer} to queue")
                             self.available_peers.put_nowait(peer)
                 else:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(0)
             self.stop()
             return self.piece_manager.completed_pieces
         except DownloadFinishedEarly:
