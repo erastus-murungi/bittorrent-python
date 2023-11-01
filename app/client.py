@@ -247,7 +247,8 @@ class PieceManager:
         while not self.abort:
             peer, piece_message = await self.block_queue.get()
             log(
-                f"Received block {piece_message.begin // BLOCK_SIZE} for piece {piece_message.index}"
+                f"[{piece_message.index}/{len(self.pieces)}]:"
+                f"[{piece_message.begin // BLOCK_SIZE}/{len(self.pieces[piece_message.index])}]"
             )
             # await t.update(piece_message.block_length())
 
@@ -480,9 +481,6 @@ class PeerConnection:
             writer.write(message)
             self.state |= PeerConnectionState.PENDING_REQUEST
             await writer.drain()
-            log(
-                f"Requested block {next_piece.offset // BLOCK_SIZE} for piece {next_piece.index} from peer {peer}"
-            )
 
     def close(self):
         self.state |= PeerConnectionState.STOPPED
