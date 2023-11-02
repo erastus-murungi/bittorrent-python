@@ -291,9 +291,9 @@ class Piece(PeerMessage):
     piece: <len=0009+X><id=7><index><begin><block> where X is the length of the block.
     """
 
-    index: int
-    begin: int
-    block: bytes
+    index: int  # The zero-based piece index.
+    begin: int  # The zero-based byte offset within the piece.
+    block: bytes  # The actual data.
     id: int = 7
 
     def __post_init__(self):

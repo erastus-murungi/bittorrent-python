@@ -20,6 +20,9 @@ class Block:
     state: BlockState = BlockState.MISSING
     data: bytes = b""
 
+    def __hash__(self):
+        return hash((self.index, self.offset))
+
 
 class Piece(list[Block]):
     index: int
