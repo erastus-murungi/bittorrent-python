@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 from typing import Union
 
 BEncodedInteger = int
 BEncodedString = bytes
 BEncodedList = list[Union[BEncodedInteger, BEncodedString]]
-BEncodedDictionary = dict[str, Union[BEncodedInteger, BEncodedString, BEncodedList]]
+BEncodedDictionary = dict[str, "BEncodedValue"]
 BEncodedValue = Union[BEncodedInteger, BEncodedString, BEncodedList, BEncodedDictionary]
 
 

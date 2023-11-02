@@ -9,6 +9,7 @@ import click
 
 from app.bencode import bencode_decode
 from app.client import Client, Peer
+from app.torrent import Torrent
 
 PEER_NUM_BYTES = 6
 
@@ -66,16 +67,16 @@ async def async_main(
 
 def print_info(file_content: bytes) -> None:
     """Print torrent info"""
-    client = Client(file_content=file_content)
+    torrent = Torrent.from_file_content(file_content)
     print(
-        f"Tracker URL: {client.get_torrent().announce}\n"
-        f"Length: {client.get_torrent().info.length}\n"
-        f"Info Hash: {client.get_torrent().info.info_hash().hexdigest()}\n"
-        f"Piece Length: {client.get_torrent().info.piece_length}"
+        f"Tracker URL: {torrent.announce}\n"
+        f"Length: {torrent.info.length}\n"
+        f"Info Hash: {torrent.info.compute_info_hash().hexdigest()}\n"
+        f"Piece Length: {torrent.info.piece_length}"
     )
     print(
         "Piece hashes: ",
-        *[piece_hash.hex() for piece_hash in client.get_torrent().info.pieces],
+        *[piece_hash.hex() for piece_hash in torrent.info.pieces],
         sep="\n",
     )
 
@@ -90,12 +91,12 @@ async def print_peers(file_content: bytes) -> None:
 
 async def perform_handshake(file_content: bytes, args: Tuple[str, ...]) -> None:
     """Perform handshake"""
-    torrent_file = Client.parse_torrent_file(file_content)
+    torrent_file = Torrent.from_file_content(file_content)
     peer_id = args[0]
     peer_ip, peer_port = peer_id.split(":")
     peer_handshake = await Client.perform_handshake(
         Peer(ip=ip_address(peer_ip), port=int(peer_port)),
-        torrent_file.info.info_hash(),
+        torrent_file.info.compute_info_hash(),
     )
     print(f"Peer ID: {peer_handshake.peer_id.hex()}")
 
