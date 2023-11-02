@@ -99,6 +99,45 @@ class PendingBlockRequest:
         return self.start_time_ns + self.max_pending_time_ns < time.monotonic_ns()
 
 
+class PieceDownloadStrategy:
+    def __init__(self):
+        pass
+
+
+class PiecesRegistry(list[Piece]):
+    def __init__(self):
+        super().__init__()
+        self._peer2pieces: dict[Peer, set[Piece]] = defaultdict(set)
+        self._piece2peers: dict[Piece, set[Peer]] = defaultdict(set)
+
+    def get_peers(self):
+        return self._peer2pieces.keys()
+
+    def update_pieces_from_peer(self, peer: Peer, bitfield: bytes) -> None:
+        pieces_available = set()
+        for index, byte in enumerate(bitfield):
+            for bit in range(8):
+                if byte & (1 << (7 - bit)):
+                    pieces_available.add(self[index * 8 + bit])
+        self._peer2pieces[peer] |= pieces_available
+        for piece in pieces_available:
+            self._peer2pieces[peer].add(piece)
+
+    def add_piece_index_for_peer(self, peer: Peer, piece_index: int) -> None:
+        piece = self[piece_index]
+        self._peer2pieces[peer].add(piece)
+        self._peer2pieces[peer].add(piece)
+
+    def contains_peer(self, peer: Peer):
+        return peer in self._peer2pieces
+
+    def get_by_peer(self, peer: Peer) -> set[Piece]:
+        return self._peer2pieces[peer]
+
+    def get_peers_with_piece(self, piece: Piece) -> set[Peer]:
+        return self._piece2peers[piece]
+
+
 class PieceManager:
     def __init__(
         self,
@@ -107,38 +146,33 @@ class PieceManager:
         max_pending_time_ms: int = 60_000,
         piece_indices: tuple[int, ...] = None,
     ):
-        self.block_queue = asyncio.Queue[tuple[Peer, PiecePeerMessage]]()
         self.torrent_file = torrent_file
-
-        self._peer_to_pieces_registry: dict[Peer, set[Piece]] = defaultdict(set)
-        self._piece_to_peers_registry: dict[Piece, set[Peer]] = defaultdict(set)
-
+        self.piece_indices = piece_indices
+        self.max_pending_time_ns = max_pending_time_ms * 1_000_000
+        self.abort = False
+        self.block_queue = asyncio.Queue[tuple[Peer, PiecePeerMessage]]()
         self.pending_block_requests: dict[
             Peer, dict[int, PendingBlockRequest]
         ] = defaultdict(dict)
         self.completed_pieces: list[Piece] = []
-        self.pieces: list[Piece] = self._init_pieces(piece_indices)
-        self.max_pending_time_ns = max_pending_time_ms * 1_000_000
-        self.abort = False
+        self.pieces: PiecesRegistry = self._init_pieces()
         self.future = asyncio.ensure_future(self.save_block())
-        self.piece_indices = piece_indices
 
     def close(self):
         self.abort = True
 
-    def _init_pieces(self, piece_indices: tuple[int, ...] = None) -> list[Piece]:
-        pieces = []
-        num_blocks_in_piece = ceil(self.torrent_file.info.piece_length / BLOCK_LENGTH)
-        for piece_index, sha1_hash in enumerate(self.torrent_file.info.pieces):
-            if piece_index < len(self.torrent_file.info.pieces) - 1:
+    def _init_pieces(self) -> PiecesRegistry:
+        info = self.torrent_file.info
+        pieces = PiecesRegistry()
+        num_blocks_in_piece = ceil(info.piece_length / BLOCK_LENGTH)
+        for piece_index, sha1_hash in enumerate(info.pieces):
+            if piece_index < len(info.pieces) - 1:
                 blocks = [
                     Block(piece_index, block_index * BLOCK_LENGTH, BLOCK_LENGTH)
                     for block_index in range(num_blocks_in_piece)
                 ]
             else:
-                last_length = (
-                    self.torrent_file.info.length % self.torrent_file.info.piece_length
-                )
+                last_length = info.length % info.piece_length
                 num_blocks_in_piece = ceil(last_length / BLOCK_LENGTH)
                 blocks = [
                     Block(piece_index, block_index * BLOCK_LENGTH, BLOCK_LENGTH)
@@ -146,14 +180,10 @@ class PieceManager:
                 ]
                 if last_length % BLOCK_LENGTH != 0:
                     blocks[-1].length = last_length % BLOCK_LENGTH
-            pieces.append(
-                Piece(
-                    piece_index, self.torrent_file.info.piece_length, blocks, sha1_hash
-                )
-            )
-        if piece_indices:
+            pieces.append(Piece(piece_index, info.piece_length, blocks, sha1_hash))
+        if self.piece_indices:
             for piece_index, piece in enumerate(pieces):
-                if piece_index not in piece_indices:
+                if piece_index not in self.piece_indices:
                     for block in piece:
                         block.state = BlockState.RECEIVED
                 if piece.is_complete():
@@ -161,19 +191,10 @@ class PieceManager:
         return pieces
 
     def update_pieces_from_peer(self, peer: Peer, bitfield: bytes) -> None:
-        pieces_available = set()
-        for index, byte in enumerate(bitfield):
-            for bit in range(8):
-                if byte & (1 << (7 - bit)):
-                    pieces_available.add(self.pieces[index * 8 + bit])
-        self._peer_to_pieces_registry[peer] |= pieces_available
-        for piece in pieces_available:
-            self._peer_to_pieces_registry[peer].add(piece)
+        self.pieces.update_pieces_from_peer(peer, bitfield)
 
     def add_piece_index_for_peer(self, peer: Peer, piece_index: int) -> None:
-        piece = self.pieces[piece_index]
-        self._peer_to_pieces_registry[peer].add(piece)
-        self._peer_to_pieces_registry[peer].add(piece)
+        self.pieces.add_piece_index_for_peer(peer, piece_index)
 
     def download_completed(self) -> bool:
         return all(piece.is_complete() for piece in self.pieces)
@@ -187,7 +208,7 @@ class PieceManager:
         return 0
 
     def get_next_request(self, peer: Peer) -> Optional[Block]:
-        if peer not in self._peer_to_pieces_registry:
+        if not self.pieces.contains_peer(peer):
             log(f"Peer {peer} not managed by this piece manager")
             return None
         if expired_request := self._expired_requests(peer):
@@ -221,8 +242,11 @@ class PieceManager:
                 return pending_block_request.block
         return None
 
+    def get_peers(self):
+        return self.pieces.get_peers()
+
     def _downloading_pieces(self, peer: Peer) -> Optional[Block]:
-        for piece in self._peer_to_pieces_registry[peer]:
+        for piece in self.pieces.get_by_peer(peer):
             if piece.has_missing_blocks():
                 next_pending_block = piece.get_next_pending_block()
                 return next_pending_block
@@ -230,10 +254,10 @@ class PieceManager:
 
     def _next_rarest(self, peer: Peer) -> Optional[Piece]:
         rarest_piece = None
-        for piece in self._peer_to_pieces_registry[peer]:
-            if rarest_piece is None or len(self._piece_to_peers_registry[piece]) < len(
-                self._piece_to_peers_registry[rarest_piece]
-            ):
+        for piece in self.pieces.get_by_peer(peer):
+            if rarest_piece is None or len(
+                self.pieces.get_peers_with_piece(piece)
+            ) < len(self.pieces.get_peers_with_piece(rarest_piece)):
                 rarest_piece = piece
         return rarest_piece
 
