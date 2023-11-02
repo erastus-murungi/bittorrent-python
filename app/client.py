@@ -2,11 +2,12 @@ import asyncio
 import hashlib
 import time
 import traceback
-from asyncio import StreamReader, StreamWriter, CancelledError
+from abc import ABC, abstractmethod
+from asyncio import StreamReader, StreamWriter
 from bisect import insort
 from collections import defaultdict
 from dataclasses import dataclass
-from enum import IntEnum, IntFlag
+from enum import IntFlag
 from ipaddress import IPv4Address, IPv6Address
 from typing import Optional
 
@@ -16,6 +17,7 @@ from app.constants import (
     BLOCK_LENGTH,
     PEER_ID,
 )
+from app.content import Block, Piece, PiecesRegistry, BlockState
 from app.messages import (
     Interested,
     Choke,
@@ -27,63 +29,13 @@ from app.messages import (
     Piece as PiecePeerMessage,
     Cancel,
     Port,
-    PeerMessage,
     HandShake,
+    PeerStreamAsyncIterator,
 )
 from app.torrent import Peer, Torrent
 from app.utils import log
 
 IPAddress = IPv4Address | IPv6Address
-
-
-class BlockState(IntEnum):
-    PENDING = 1
-    RECEIVED = 2
-    MISSING = 3
-
-
-@dataclass(slots=True)
-class Block:
-    index: int
-    offset: int
-    length: int
-    state: BlockState = BlockState.MISSING
-    data: bytes = b""
-
-
-class Piece(list[Block]):
-    index: int
-    length: int
-    sha1_hash: bytes
-
-    def __init__(self, index: int, length: int, blocks: list[Block], sha1_hash: bytes):
-        super().__init__(blocks)
-        self.index = index
-        self.length = length
-        self.sha1_hash = sha1_hash
-
-    def is_complete(self) -> bool:
-        return all(block.state == BlockState.RECEIVED for block in self)
-
-    def has_missing_blocks(self) -> bool:
-        return any(block.state == BlockState.MISSING for block in self)
-
-    def get_next_pending_block(self) -> Optional[Block]:
-        for block in self:
-            if block.state == BlockState.MISSING:
-                return block
-        return None
-
-    def get_data(self) -> bytes:
-        return b"".join(
-            block.data for block in sorted(self, key=lambda block: block.offset)
-        )
-
-    def __hash__(self):
-        return hash(self.index)
-
-    def __eq__(self, other):
-        return self.index == other.index
 
 
 @dataclass(kw_only=True)
@@ -99,43 +51,91 @@ class PendingBlockRequest:
         return self.start_time_ns + self.max_pending_time_ns < time.monotonic_ns()
 
 
-class PieceDownloadStrategy:
-    def __init__(self):
+class PendingRequestsRegistry(defaultdict[Peer, dict[int, PendingBlockRequest]]):
+    def __init__(
+        self,
+        max_pending_time_ns,
+        received_blocks_queue: asyncio.Queue[tuple[Peer, PiecePeerMessage]]
+        | None = None,
+    ):
+        super().__init__(dict)
+        self.received_blocks_queue = received_blocks_queue or asyncio.Queue()
+        self.max_pending_time_ns = max_pending_time_ns
+
+    def on_block_received(self, peer: Peer, piece_message: PiecePeerMessage):
+        self[peer].pop(piece_message.begin)
+        self.received_blocks_queue.put_nowait((peer, piece_message))
+
+    def get_earliest_expired_request(self, peer: Peer) -> Optional[PendingBlockRequest]:
+        pass
+
+    def get_and_reset_first_expired_request(self, peer: Peer):
+        for pending_block_request in self[peer].values():
+            if pending_block_request.is_expired():
+                # reset timer
+                pending_block_request.start_time_ns = time.monotonic_ns()
+                return pending_block_request
+        return None
+
+    def get_expired_requests(self, peer: Peer):
         pass
 
 
-class PiecesRegistry(list[Piece]):
-    def __init__(self):
-        super().__init__()
-        self._peer2pieces: dict[Peer, set[Piece]] = defaultdict(set)
-        self._piece2peers: dict[Piece, set[Peer]] = defaultdict(set)
+class PieceDownloadStrategy(ABC):
+    def __init__(self, piece_registry: PiecesRegistry):
+        self.pieces: PiecesRegistry = piece_registry
 
-    def get_peers(self):
-        return self._peer2pieces.keys()
+    @abstractmethod
+    def get_next_block_to_request(self, peer: Peer) -> Optional[Block]:
+        pass
 
-    def update_pieces_from_peer(self, peer: Peer, bitfield: bytes) -> None:
-        pieces_available = set()
-        for index, byte in enumerate(bitfield):
-            for bit in range(8):
-                if byte & (1 << (7 - bit)):
-                    pieces_available.add(self[index * 8 + bit])
-        self._peer2pieces[peer] |= pieces_available
-        for piece in pieces_available:
-            self._peer2pieces[peer].add(piece)
 
-    def add_piece_index_for_peer(self, peer: Peer, piece_index: int) -> None:
-        piece = self[piece_index]
-        self._peer2pieces[peer].add(piece)
-        self._peer2pieces[peer].add(piece)
+class RarestPieceStrategy(PieceDownloadStrategy):
+    def __init__(
+        self,
+        piece_registry: PiecesRegistry,
+        pending_requests_registry: PendingRequestsRegistry,
+    ):
+        super().__init__(piece_registry)
+        self.pending_requests = pending_requests_registry
 
-    def contains_peer(self, peer: Peer):
-        return peer in self._peer2pieces
+    def compute_next_pending_block_of_first_ongoing_piece(
+        self, peer: Peer
+    ) -> Optional[Block]:
+        for piece in self.pieces.get_by_peer(peer):
+            if piece.has_missing_blocks():
+                return piece.get_next_pending_block()
+        return None
 
-    def get_by_peer(self, peer: Peer) -> set[Piece]:
-        return self._peer2pieces[peer]
+    def get_next_block_to_request(self, peer: Peer) -> Optional[Block]:
+        if not self.pieces.contains_peer(peer):
+            log(f"Peer {peer} not managed by this piece manager")
+            return None
+        if expired_request := self.pending_requests.get_and_reset_first_expired_request(
+            peer
+        ):
+            return expired_request.block
+        block = self.compute_next_pending_block_of_first_ongoing_piece(peer)
+        if not block:
+            block = self.compute_next_pending_block_of_rarest_piece(peer)
+        if isinstance(block, Piece):
+            self.compute_next_pending_block_of_first_ongoing_piece(peer)
+            self.compute_next_pending_block_of_rarest_piece(peer)
+        if block:
+            self.pending_requests[peer][block.offset] = PendingBlockRequest(
+                block=block,
+                max_pending_time_ns=self.pending_requests.max_pending_time_ns,
+            )
+        return block
 
-    def get_peers_with_piece(self, piece: Piece) -> set[Peer]:
-        return self._piece2peers[piece]
+    def compute_next_pending_block_of_rarest_piece(self, peer: Peer) -> Optional[Block]:
+        rarest_piece = None
+        for piece in self.pieces.get_by_peer(peer):
+            if rarest_piece is None or len(
+                self.pieces.get_peers_with_piece(piece)
+            ) < len(self.pieces.get_peers_with_piece(rarest_piece)):
+                rarest_piece = piece
+        return rarest_piece and rarest_piece.get_next_pending_block()
 
 
 class PieceManager:
@@ -144,19 +144,25 @@ class PieceManager:
         torrent_file: Torrent,
         *,
         max_pending_time_ms: int = 60_000,
-        piece_indices: tuple[int, ...] = None,
+        piece_indices: tuple[int, ...] | None = None,
+        piece_download_strategy: PieceDownloadStrategy | None = None,
     ):
         self.torrent_file = torrent_file
         self.piece_indices = piece_indices
-        self.max_pending_time_ns = max_pending_time_ms * 1_000_000
         self.abort = False
-        self.block_queue = asyncio.Queue[tuple[Peer, PiecePeerMessage]]()
-        self.pending_block_requests: dict[
-            Peer, dict[int, PendingBlockRequest]
-        ] = defaultdict(dict)
+        self.pending_block_requests: PendingRequestsRegistry = PendingRequestsRegistry(
+            max_pending_time_ms * 1_000_000
+        )
         self.completed_pieces: list[Piece] = []
         self.pieces: PiecesRegistry = self._init_pieces()
+        self.piece_download_strategy: PieceDownloadStrategy = (
+            piece_download_strategy
+            or RarestPieceStrategy(self.pieces, self.pending_block_requests)
+        )
         self.future = asyncio.ensure_future(self.save_block())
+
+    def get_next_block_to_request(self, peer: Peer):
+        return self.piece_download_strategy.get_next_block_to_request(peer)
 
     def close(self):
         self.abort = True
@@ -207,64 +213,20 @@ class PieceManager:
     def bytes_uploaded(self) -> int:
         return 0
 
-    def get_next_request(self, peer: Peer) -> Optional[Block]:
-        if not self.pieces.contains_peer(peer):
-            log(f"Peer {peer} not managed by this piece manager")
-            return None
-        if expired_request := self._expired_requests(peer):
-            return expired_request
-        block = self._downloading_pieces(peer)
-        if not block:
-            block = self._next_rarest(peer).get_next_pending_block()
-        if block:
-            self.pending_block_requests[peer][block.offset] = PendingBlockRequest(
-                block=block, max_pending_time_ns=self.max_pending_time_ns
-            )
-        return block
-
     def block_received(self, peer: Peer, piece_message: PiecePeerMessage) -> None:
         # remove from pending requests queue
-        self.pending_block_requests[peer].pop(piece_message.begin)
-        self.block_queue.put_nowait((peer, piece_message))
-
-    def _expired_requests(self, peer) -> Optional[Block]:
-        for pending_block_request in self.pending_block_requests[peer].values():
-            if pending_block_request.is_expired():
-                log(
-                    "Re-requesting block {block} for "
-                    "piece {piece}".format(
-                        block=pending_block_request.block.offset,
-                        piece=pending_block_request.block.index,
-                    )
-                )
-                # Reset expiration timer
-                pending_block_request.start_time_ns = time.monotonic_ns()
-                return pending_block_request.block
-        return None
+        self.pending_block_requests.on_block_received(peer, piece_message)
 
     def get_peers(self):
         return self.pieces.get_peers()
 
-    def _downloading_pieces(self, peer: Peer) -> Optional[Block]:
-        for piece in self.pieces.get_by_peer(peer):
-            if piece.has_missing_blocks():
-                next_pending_block = piece.get_next_pending_block()
-                return next_pending_block
-        return None
-
-    def _next_rarest(self, peer: Peer) -> Optional[Piece]:
-        rarest_piece = None
-        for piece in self.pieces.get_by_peer(peer):
-            if rarest_piece is None or len(
-                self.pieces.get_peers_with_piece(piece)
-            ) < len(self.pieces.get_peers_with_piece(rarest_piece)):
-                rarest_piece = piece
-        return rarest_piece
-
     async def save_block(self):
         # async with tqdm(total=self.torrent_file.info.length) as t:
         while not self.abort:
-            peer, piece_message = await self.block_queue.get()
+            (
+                peer,
+                piece_message,
+            ) = await self.pending_block_requests.received_blocks_queue.get()
             log(
                 f"[{piece_message.index}/{len(self.pieces)}]:"
                 f"[{piece_message.begin // BLOCK_LENGTH}/{len(self.pieces[piece_message.index])}]"
@@ -287,41 +249,6 @@ class PieceManager:
                 if piece_hash.hex() != actual_piece_data_hash.hexdigest():
                     log(f"Piece {piece_message.index} hash mismatch")
                 insort(self.completed_pieces, piece, key=lambda p: p.index)
-
-
-@dataclass(slots=True)
-class PeerStreamAsyncIterator:
-    reader: StreamReader
-    buffer: bytes = b""
-
-    def __aiter__(self):
-        return self
-
-    def _check_buffer_and_get_message(self) -> Optional[PeerMessage]:
-        if self.buffer:
-            message, self.buffer = PeerMessage.from_bytes(self.buffer)
-            if message:
-                return message
-        return None
-
-    async def __anext__(self):
-        try:
-            while True:
-                data = await self.reader.read(BLOCK_LENGTH)
-                if data:
-                    self.buffer += data
-                else:
-                    log("No data received from peer")
-                message = self._check_buffer_and_get_message()
-                if message:
-                    return message
-                if not data:
-                    raise StopAsyncIteration
-        except CancelledError:
-            raise StopAsyncIteration()
-        except Exception as exception:
-            log(f"Error when iterating over stream! {exception}")
-            raise StopAsyncIteration()
 
 
 class PeerConnectionState(IntFlag):
@@ -440,7 +367,7 @@ class PeerConnection:
             log(f"Failed to connect to {peer} with exception {e}")
 
     async def _request_piece(self, peer: Peer, writer: StreamWriter):
-        next_piece = self.piece_manager.get_next_request(peer)
+        next_piece = self.piece_manager.get_next_block_to_request(peer)
         if next_piece:
             next_piece.state = BlockState.PENDING
             message = Request(

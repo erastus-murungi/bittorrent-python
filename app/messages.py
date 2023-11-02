@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import struct
 from abc import abstractmethod, ABC
+from asyncio import StreamReader, CancelledError
 from dataclasses import dataclass
 from typing import Final, Optional
 
-from app.constants import HEADER_LENGTH
+from app.constants import HEADER_LENGTH, BLOCK_LENGTH
+from app.utils import log
 
 
 @dataclass
@@ -393,6 +395,41 @@ class HandShake:
             peer_id,
         ) = struct.unpack(">B19s8x20s20s", resp)
         return HandShake(info_hash=info_hash, peer_id=peer_id)
+
+
+@dataclass(slots=True)
+class PeerStreamAsyncIterator:
+    reader: StreamReader
+    buffer: bytes = b""
+
+    def __aiter__(self):
+        return self
+
+    def _check_buffer_and_get_message(self) -> Optional[PeerMessage]:
+        if self.buffer:
+            message, self.buffer = PeerMessage.from_bytes(self.buffer)
+            if message:
+                return message
+        return None
+
+    async def __anext__(self):
+        try:
+            while True:
+                data = await self.reader.read(BLOCK_LENGTH)
+                if data:
+                    self.buffer += data
+                else:
+                    log("No data received from peer")
+                message = self._check_buffer_and_get_message()
+                if message:
+                    return message
+                if not data:
+                    raise StopAsyncIteration
+        except CancelledError:
+            raise StopAsyncIteration()
+        except Exception as exception:
+            log(f"Error when iterating over stream! {exception}")
+            raise StopAsyncIteration()
 
 
 if __name__ == "__main__":
