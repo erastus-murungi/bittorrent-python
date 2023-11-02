@@ -99,6 +99,14 @@ class TrackerGetRequestParams(TypedDict):
     # Generally used for the origin if it's on the same machine as the tracker.
     ip: NotRequired[IPv4Address | IPv6Address]
 
+    # If specified, must be one of started, completed, stopped, (or empty which is the same as not being specified).
+    # If not specified, then this request is one performed at regular intervals.
+    #   started: The first request to the tracker must include the event key with this value.
+    #   stopped: Must be sent to the tracker if the client is shutting down gracefully.
+    #   completed:  Must be sent to the tracker when the download completes.
+    #               However, must not be sent if the download was already 100% complete when the client started.
+    #               Presumably, this is to allow the tracker to increment
+    #               the "completed downloads" metric based solely on this event.
     event: NotRequired[Literal["started", "completed", "stopped"]]
 
 
@@ -198,6 +206,14 @@ class Torrent:
     def _create_tracker_request_params(
         self, first: bool = False, uploaded: int = 0, downloaded: int = 0
     ) -> TrackerGetRequestParams:
+        """
+        Creates the request parameters for a GET request to the tracker.
+
+        :param first: True if this is our first request to the tracker
+        :param uploaded: The number of bytes uploaded so far
+        :param downloaded: The number of bytes downloaded so far
+        :return:
+        """
         req_params = {
             "info_hash": self.info.compute_info_hash().digest(),
             "peer_id": PEER_ID,
@@ -214,6 +230,15 @@ class Torrent:
     async def discover_peers(
         self, first: bool = False, uploaded: int = 0, downloaded: int = 0
     ) -> TrackerGetResponse:
+        """
+        Asynchronously sends a that sends a GET request to the tracker to discover peers.
+
+        :param first: True if this is our first request to the tracker
+        :param uploaded: The number of bytes uploaded so far
+        :param downloaded: The number of bytes downloaded so far
+        :return: TrackerGetResponse
+
+        """
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 self.announce
