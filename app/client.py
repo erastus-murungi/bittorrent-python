@@ -15,6 +15,9 @@ from math import ceil
 from app.constants import (
     BLOCK_LENGTH,
     PEER_ID,
+    DEFAULT_MAX_PENDING_TIME_MS,
+    HANDSHAKE_BUFFER_SIZE,
+    DEFAULT_SLEEP_SECONDS_BEFORE_CALLING_TRACKER,
 )
 from app.content import Block, Piece, PiecesRegistry, BlockState
 from app.messages import (
@@ -122,7 +125,7 @@ class PieceManager:
         self,
         torrent_file: Torrent,
         *,
-        max_pending_time_ms: int = 60_000,
+        max_pending_time_ms: int = DEFAULT_MAX_PENDING_TIME_MS,
         piece_indices: tuple[int, ...] | None = None,
         piece_download_strategy: PieceDownloadStrategy | None = None,
     ):
@@ -190,7 +193,7 @@ class PieceManager:
 
     @property
     def bytes_uploaded(self) -> int:
-        return 0
+        raise NotImplementedError('Upload not implemented yet')
 
     def block_received(self, peer: Peer, piece_message: PiecePeerMessage) -> None:
         # remove from pending requests queue
@@ -208,8 +211,8 @@ class PieceManager:
                 piece_message,
             ) = await self.pending_block_requests.received_blocks_queue.get()
             log(
-                f"[{piece_message.index}/{len(self.pieces)}]:"
-                f"[{piece_message.begin // BLOCK_LENGTH}/{len(self.pieces[piece_message.index])}]"
+                f"[{piece_message.index + 1}/{len(self.pieces)}]:"
+                f"[{(piece_message.begin // BLOCK_LENGTH) + 1}/{len(self.pieces[piece_message.index])}]"
             )
             # await t.update(piece_message.block_length())
 
@@ -253,7 +256,7 @@ class PeerConnection:
         self.state = PeerConnectionState.INITIALIZED
         self.future = asyncio.ensure_future(self.connect())
 
-    async def _handshake(self, peer):
+    async def _handshake(self, peer: Peer) -> tuple[StreamReader, StreamWriter]:
         log(f"Connecting to peer {peer}")
         server_ip, server_port = peer.ip, peer.port
 
@@ -264,13 +267,15 @@ class PeerConnection:
         writer.write(handshake.pack())
         await writer.drain()
 
-        buffer = await reader.read(68)
+        buffer = await reader.read(HANDSHAKE_BUFFER_SIZE)
 
         # ensure the handshake is valid
         peer_handshake = HandShake.decode(buffer)
         if peer_handshake.info_hash != handshake.info_hash:
-            raise ValueError("Peer sent invalid info hash")
-
+            # TODO: ignore and/or retry the peer up to a number of times
+            raise ValueError(
+                f"The info hash from the peer {peer} does not match the expected info hash"
+            )
         log(f"Handshake successful with peer {server_ip}:{server_port}")
         self.state |= PeerConnectionState.CHOKED
         return reader, writer
@@ -385,7 +390,7 @@ class Client:
         writer.write(handshake.pack())
         await writer.drain()
 
-        buffer = await reader.read(68)
+        buffer = await reader.read(HANDSHAKE_BUFFER_SIZE)
 
         # ensure the handshake is valid
         peer_handshake = HandShake.decode(buffer)
@@ -407,9 +412,6 @@ class Client:
                 self.piece_manager.completed_pieces, key=lambda piece: piece.index
             )
         )
-
-    def get_torrent(self) -> Torrent:
-        return self.torrent
 
     async def start(self, piece_indices: tuple[int, ...] = None):
         self.piece_manager = PieceManager(self.torrent, piece_indices=piece_indices)
@@ -440,14 +442,13 @@ class Client:
                 )
 
                 if response:
-                    previous = current
-                    interval = response.interval
+                    previous, interval = current, response.interval
                     self._empty_queue()
                     for peer in response.peers:
                         log(f"Adding peer {peer} to queue")
                         self.available_peers.put_nowait(peer)
             else:
-                await asyncio.sleep(0)
+                await asyncio.sleep(DEFAULT_SLEEP_SECONDS_BEFORE_CALLING_TRACKER)
         self.stop()
         return self.piece_manager.completed_pieces
 
