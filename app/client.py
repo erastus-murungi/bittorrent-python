@@ -275,32 +275,31 @@ class PeerStreamAsyncIterator:
     def __aiter__(self):
         return self
 
+    def _check_buffer_and_get_message(self) -> Optional[PeerMessage]:
+        if self.buffer:
+            message = self._parse_peer_message()
+            if message:
+                return message
+        return None
+
     async def __anext__(self):
-        while True:
-            try:
+        try:
+            while True:
                 data = await self.reader.read(BLOCK_LENGTH)
                 if data:
                     self.buffer += data
-                    message = self._parse_peer_message()
-                    if message:
-                        return message
                 else:
                     log("No data received from peer")
-                    if self.buffer:
-                        message = self._parse_peer_message()
-                        if message:
-                            return message
+                message = self._check_buffer_and_get_message()
+                if message:
+                    return message
+                if not data:
                     raise StopAsyncIteration
-            except ConnectionResetError:
-                log("Connection closed by peer")
-                raise StopAsyncIteration()
-            except CancelledError:
-                raise StopAsyncIteration()
-            except StopAsyncIteration as e:
-                raise e
-            except Exception:
-                log("Error when iterating over stream!")
-                raise StopAsyncIteration()
+        except CancelledError:
+            raise StopAsyncIteration()
+        except Exception as exception:
+            log(f"Error when iterating over stream! {exception}")
+            raise StopAsyncIteration()
 
     def _parse_peer_message(self) -> Optional[PeerMessage]:
         def consume(num_bytes: int) -> bytes:
