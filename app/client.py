@@ -13,13 +13,11 @@ from typing import Optional
 from math import ceil
 
 from app.constants import (
-    PEER_MESSAGE_LENGTH_SIZE,
     BLOCK_LENGTH,
     PEER_ID,
 )
 from app.messages import (
     Interested,
-    KeepAlive,
     Choke,
     Unchoke,
     NotInterested,
@@ -277,7 +275,7 @@ class PeerStreamAsyncIterator:
 
     def _check_buffer_and_get_message(self) -> Optional[PeerMessage]:
         if self.buffer:
-            message = self._parse_peer_message()
+            message, self.buffer = PeerMessage.from_bytes(self.buffer)
             if message:
                 return message
         return None
@@ -300,54 +298,6 @@ class PeerStreamAsyncIterator:
         except Exception as exception:
             log(f"Error when iterating over stream! {exception}")
             raise StopAsyncIteration()
-
-    def _parse_peer_message(self) -> Optional[PeerMessage]:
-        def consume(num_bytes: int) -> bytes:
-            result = self.buffer[: num_bytes + PEER_MESSAGE_LENGTH_SIZE]
-            self.buffer = self.buffer[num_bytes + PEER_MESSAGE_LENGTH_SIZE :]
-            return result
-
-        if len(self.buffer) >= PEER_MESSAGE_LENGTH_SIZE:
-            message_length = int.from_bytes(
-                self.buffer[:PEER_MESSAGE_LENGTH_SIZE], "big"
-            )
-            if message_length == 0:
-                consume(message_length)
-                return KeepAlive.get()
-            if len(self.buffer) >= message_length:
-                message_id = int.from_bytes(
-                    self.buffer[
-                        PEER_MESSAGE_LENGTH_SIZE : PEER_MESSAGE_LENGTH_SIZE + 1
-                    ],
-                    "big",
-                )
-                match message_id:
-                    case Interested.id:
-                        consume(message_length)
-                        return Interested.get()
-                    case Choke.id:
-                        consume(message_length)
-                        return Choke.get()
-                    case Unchoke.id:
-                        consume(message_length)
-                        return Unchoke.get()
-                    case NotInterested.id:
-                        consume(message_length)
-                        return NotInterested.get()
-                    case Have.id:
-                        return Have.decode(consume(message_length))
-                    case BitField.id:
-                        return BitField.decode(consume(message_length))
-                    case Request.id:
-                        return Request.decode(consume(message_length))
-                    case Piece.id:
-                        return Piece.decode(consume(message_length))
-                    case Cancel.id:
-                        return Cancel.decode(consume(message_length))
-                    case Port.id:
-                        return Port.decode(consume(message_length))
-                    case _:
-                        raise ValueError(f"Invalid message id {message_id}")
 
 
 class PeerConnectionState(IntFlag):

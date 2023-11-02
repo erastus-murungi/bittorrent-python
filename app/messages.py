@@ -3,7 +3,9 @@ from __future__ import annotations
 import struct
 from abc import abstractmethod, ABC
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Optional
+
+from app.constants import HEADER_LENGTH
 
 
 @dataclass
@@ -22,6 +24,51 @@ class PeerMessage(ABC):
 
     len: int
     id: int
+
+    @staticmethod
+    def from_bytes(buffer: bytes) -> tuple[Optional[PeerMessage], bytes]:
+        if len(buffer) < HEADER_LENGTH:
+            return None, buffer
+
+        message_length = int.from_bytes(buffer[:HEADER_LENGTH], "big")
+
+        if message_length == 0:
+            return KeepAlive.get(), buffer[message_length + HEADER_LENGTH :]
+
+        if len(buffer) < message_length:
+            return None, buffer
+
+        message_id = int.from_bytes(
+            buffer[HEADER_LENGTH : HEADER_LENGTH + 1],
+            "big",
+        )
+        message_bytes, rest = (
+            buffer[: message_length + HEADER_LENGTH],
+            buffer[message_length + HEADER_LENGTH :],
+        )
+        match message_id:
+            case Interested.id:
+                return Interested.get(), rest
+            case Choke.id:
+                return Choke.get(), rest
+            case Unchoke.id:
+                return Unchoke.get(), rest
+            case NotInterested.id:
+                return NotInterested.get(), rest
+            case Have.id:
+                return Have.decode(message_bytes), rest
+            case BitField.id:
+                return BitField.decode(message_bytes), rest
+            case Request.id:
+                return Request.decode(message_bytes), rest
+            case Piece.id:
+                return Piece.decode(message_bytes), rest
+            case Cancel.id:
+                return Cancel.decode(message_bytes), rest
+            case Port.id:
+                return Port.decode(message_bytes), rest
+            case _:
+                raise ValueError(f"Invalid message id {message_id}")
 
 
 class FixedLengthPeerMessage(PeerMessage, ABC):
