@@ -24,7 +24,7 @@ from app.messages import (
     Have,
     BitField,
     Request,
-    Piece,
+    Piece as PiecePeerMessage,
     Cancel,
     Port,
     PeerMessage,
@@ -51,7 +51,7 @@ class Block:
     data: bytes = b""
 
 
-class OnePiece(list[Block]):
+class Piece(list[Block]):
     index: int
     length: int
     sha1_hash: bytes
@@ -107,17 +107,17 @@ class PieceManager:
         max_pending_time_ms: int = 60_000,
         piece_indices: tuple[int, ...] = None,
     ):
-        self.block_queue = asyncio.Queue[tuple[Peer, Piece]]()
+        self.block_queue = asyncio.Queue[tuple[Peer, PiecePeerMessage]]()
         self.torrent_file = torrent_file
 
-        self._peer_to_pieces_registry: dict[Peer, set[OnePiece]] = defaultdict(set)
-        self._piece_to_peers_registry: dict[OnePiece, set[Peer]] = defaultdict(set)
+        self._peer_to_pieces_registry: dict[Peer, set[Piece]] = defaultdict(set)
+        self._piece_to_peers_registry: dict[Piece, set[Peer]] = defaultdict(set)
 
         self.pending_block_requests: dict[
             Peer, dict[int, PendingBlockRequest]
         ] = defaultdict(dict)
-        self.completed_pieces: list[OnePiece] = []
-        self.pieces: list[OnePiece] = self._init_pieces(piece_indices)
+        self.completed_pieces: list[Piece] = []
+        self.pieces: list[Piece] = self._init_pieces(piece_indices)
         self.max_pending_time_ns = max_pending_time_ms * 1_000_000
         self.abort = False
         self.future = asyncio.ensure_future(self.save_block())
@@ -126,7 +126,7 @@ class PieceManager:
     def close(self):
         self.abort = True
 
-    def _init_pieces(self, piece_indices: tuple[int, ...] = None) -> list[OnePiece]:
+    def _init_pieces(self, piece_indices: tuple[int, ...] = None) -> list[Piece]:
         pieces = []
         num_blocks_in_piece = ceil(self.torrent_file.info.piece_length / BLOCK_LENGTH)
         for piece_index, sha1_hash in enumerate(self.torrent_file.info.pieces):
@@ -147,7 +147,7 @@ class PieceManager:
                 if last_length % BLOCK_LENGTH != 0:
                     blocks[-1].length = last_length % BLOCK_LENGTH
             pieces.append(
-                OnePiece(
+                Piece(
                     piece_index, self.torrent_file.info.piece_length, blocks, sha1_hash
                 )
             )
@@ -201,7 +201,7 @@ class PieceManager:
             )
         return block
 
-    def block_received(self, peer: Peer, piece_message: Piece) -> None:
+    def block_received(self, peer: Peer, piece_message: PiecePeerMessage) -> None:
         # remove from pending requests queue
         self.pending_block_requests[peer].pop(piece_message.begin)
         self.block_queue.put_nowait((peer, piece_message))
@@ -228,7 +228,7 @@ class PieceManager:
                 return next_pending_block
         return None
 
-    def _next_rarest(self, peer: Peer) -> Optional[OnePiece]:
+    def _next_rarest(self, peer: Peer) -> Optional[Piece]:
         rarest_piece = None
         for piece in self._peer_to_pieces_registry[peer]:
             if rarest_piece is None or len(self._piece_to_peers_registry[piece]) < len(
@@ -391,7 +391,7 @@ class PeerConnection:
                         self.piece_manager.update_pieces_from_peer(peer, bitfield)
                     case Request(index=piece_index):
                         log(f"Peer requested piece {piece_index}")
-                    case Piece() as piece_message:
+                    case PiecePeerMessage() as piece_message:
                         self.clear_pending_request()
                         self.piece_manager.block_received(peer, piece_message)
                     case Cancel():
