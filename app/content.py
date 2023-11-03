@@ -81,7 +81,7 @@ class PiecesRegistry(list[Piece]):
     def add_piece_index_for_peer(self, peer: Peer, piece_index: int) -> None:
         piece = self[piece_index]
         self._peer2pieces[peer].add(piece)
-        self._peer2pieces[peer].add(piece)
+        self._piece2peers[piece].add(peer)
 
     def contains_peer(self, peer: Peer):
         return peer in self._peer2pieces

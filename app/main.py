@@ -45,7 +45,7 @@ async def async_download_full_file(
     client = Client(file_content=file_content)
     await client.start()
     output_file.write(client.get_downloaded_data())
-    print(f"Downloaded {client.get_torrent().info.name} to {output_file.name}")
+    print(f"Downloaded {client.torrent.info.name} to {output_file.name}")
 
 
 async def async_main(
@@ -84,7 +84,7 @@ def print_info(file_content: bytes) -> None:
 async def print_peers(file_content: bytes) -> None:
     """Print peers"""
     client = Client(file_content=file_content)
-    metainfo = client.get_torrent()
+    metainfo = client.torrent
     tracker_info = await metainfo.discover_peers()
     print("\n".join(f"{peer.ip}:{peer.port}" for peer in tracker_info.peers))
 

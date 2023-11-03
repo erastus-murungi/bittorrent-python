@@ -193,7 +193,7 @@ class PieceManager:
 
     @property
     def bytes_uploaded(self) -> int:
-        raise NotImplementedError('Upload not implemented yet')
+        return 0
 
     def block_received(self, peer: Peer, piece_message: PiecePeerMessage) -> None:
         # remove from pending requests queue
