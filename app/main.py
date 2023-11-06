@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import sys
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Literal, Tuple, Union
@@ -46,6 +47,7 @@ async def async_download_full_file(
     await client.start()
     output_file.write(client.get_downloaded_data())
     print(f"Downloaded {client.torrent.info.name} to {output_file.name}")
+    print(client.get_downloaded_data().decode(), file=sys.stderr)
 
 
 async def async_main(

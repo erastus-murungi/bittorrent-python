@@ -4,7 +4,6 @@ import time
 import traceback
 from abc import ABC, abstractmethod
 from asyncio import StreamReader, StreamWriter
-from bisect import insort
 from collections import defaultdict
 from enum import IntFlag
 from ipaddress import IPv4Address, IPv6Address
@@ -34,6 +33,7 @@ from app.messages import (
     HandShake,
     PeerStreamAsyncIterator,
 )
+from app.progress_manager import ProgressManager
 from app.torrent import Peer, Torrent
 from app.utils import log, Heap
 
@@ -141,6 +141,7 @@ class PieceManager:
             piece_download_strategy
             or RarestPieceStrategy(self.pieces, self.pending_block_requests)
         )
+        self.progress_manager = ProgressManager(torrent_file.info)
         self.future = asyncio.ensure_future(self.save_block())
 
     def get_next_block_to_request(self, peer: Peer):
@@ -231,7 +232,7 @@ class PieceManager:
                 actual_piece_data_hash = hashlib.sha1(piece_data)
                 if piece_hash.hex() != actual_piece_data_hash.hexdigest():
                     log(f"Piece {piece.index} hash mismatch")
-                insort(self.completed_pieces, piece, key=lambda p: p.index)
+                self.progress_manager.received_pieces.put_nowait(piece)
 
 
 class PeerConnectionState(IntFlag):

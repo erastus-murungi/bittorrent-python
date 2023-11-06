@@ -11,7 +11,7 @@ logging.basicConfig(
 
 
 def log(message: str) -> None:
-    logging.info(message)
+    # logging.info(message)
     return None
 
 
