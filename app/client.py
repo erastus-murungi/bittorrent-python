@@ -1,15 +1,23 @@
 import asyncio
 import hashlib
+import signal
+import sys
 import time
 import traceback
 from abc import ABC, abstractmethod
 from asyncio import StreamReader, StreamWriter
+from bisect import insort
 from collections import defaultdict
 from enum import IntFlag
 from ipaddress import IPv4Address, IPv6Address
-from typing import Optional
+from itertools import cycle
+from typing import Optional, TextIO
 
+import resource
+from humanfriendly import format_timespan, format_size
 from math import ceil
+from more_itertools import quantify
+from termcolor import colored
 
 from app.constants import (
     BLOCK_LENGTH,
@@ -33,11 +41,102 @@ from app.messages import (
     HandShake,
     PeerStreamAsyncIterator,
 )
-from app.progress_manager import ProgressManager
+from app.peer_discovery import discover_peers
 from app.torrent import Peer, Torrent
 from app.utils import log, Heap
 
 IPAddress = IPv4Address | IPv6Address
+
+ANSI_ERASE_CURRENT_LINE = "\u001b[2K"
+ANSI_MOVE_CURSOR_UP_ONE_LINE = "\x1b[1A"
+ANSI_HIDE_CURSOR = "\x1b[?25l"
+ANSI_SHOW_CURSOR = "\x1b[?25h"
+
+PROGRESS_SPINNER_SEQUENCE = cycle("◐ ◓ ◑ ◒".split())
+
+COMPLETED_JOBS_REFRESH_TIME = 3
+FRAMES_PER_CYCLE = 1.0 / 10.0
+
+MAX_NUMBER_CHARACTERS_HEADER_PROGRESS_BAR = 30
+
+INDENT = "    "
+
+
+def get_green_bold_colored(text: str) -> str:
+    return colored(f"{text}", "green", attrs=["bold"])
+
+
+class File:
+    def __init__(self, file_path: str, file_size: int):
+        self.file_path = file_path
+        self.file_size = file_size
+        self.start_time: float | None = None
+        self.finish_time: float | None = None
+        self.downloaded: list[Piece] = []
+        self.downloaded_size: int = 0
+        self.queue = asyncio.Queue[Piece]()
+        self.future = asyncio.ensure_future(self.start())
+
+    @property
+    def is_completed(self) -> bool:
+        return self.downloaded_size == self.file_size
+
+    def start_progress(self):
+        self.start_time = time.monotonic()
+
+    @property
+    def is_not_completed(self):
+        return not self.is_completed
+
+    async def start(self):
+        while self.is_not_completed:
+            piece = await self.queue.get()
+            insort(self.downloaded, piece, key=lambda p: p.index)
+            self.downloaded_size += piece.length
+
+    def cleanup(self):
+        if self.future:
+            self.future.cancel()
+
+    def get_progress_item_title(self) -> str:
+        """
+        Return a title to display
+
+        """
+        return f"{self.file_path}"
+
+    def get_normalized_progress(self) -> float:
+        """
+        Returns the progress of this time with 1 being complete
+
+        :return: The progress from 0 to 1
+        """
+        if self.file_size is None:
+            return 0.0
+        normalized_progress = len(self.downloaded) / self.file_size
+        if normalized_progress >= 1.0:
+            if self.finish_time is None:
+                self.finish_time = time.monotonic()
+        return min(normalized_progress, 1.0)
+
+    def get_percentage_progress(self) -> float:
+        return self.get_normalized_progress() * 100
+
+    def pretty_print_progress(self, text_io: TextIO = sys.stdout) -> None:
+        progress_item_title = colored(self.get_progress_item_title(), "white")
+        progress_spinner_code_point = next(PROGRESS_SPINNER_SEQUENCE)
+        if self.is_completed:
+            # we define done_str because f-strings do not allow `\`
+            done_str = "\u2714"
+            text_io.write(
+                f"{INDENT}{get_green_bold_colored(done_str)} {progress_item_title} ... finished in "
+                f"{format_timespan(self.finish_time - self.start_time)}\n"
+            )
+        else:
+            text_io.write(
+                f"{INDENT}{progress_spinner_code_point} {progress_item_title} ... "
+                f"{format_timespan(time.monotonic() - self.start_time)}    ({self.get_percentage_progress():04.2f} %)\n"
+            )
 
 
 class PendingRequestsRegistry(defaultdict[Peer, Heap[Block]]):
@@ -51,11 +150,26 @@ class PendingRequestsRegistry(defaultdict[Peer, Heap[Block]]):
         self.received_blocks_queue = received_blocks_queue or asyncio.Queue()
         self.max_pending_time_ns = max_pending_time_ns
 
-    def on_block_received(
-        self, peer: Peer, peer_message: PiecePeerMessage, block: Block
+    async def on_block_received(
+        self, peer: Peer, piece_message: PiecePeerMessage, block: Block, piece: Piece
     ):
         self[peer].delete(block)
-        self.received_blocks_queue.put_nowait((peer, peer_message))
+        # update piece
+        piece[piece_message.begin // BLOCK_LENGTH].state = BlockState.RECEIVED
+        piece[piece_message.begin // BLOCK_LENGTH].data = piece_message.block
+
+        if piece.is_complete():
+            log(f"Piece {piece.index + 1} completed")
+            # get expected sha1 hash of piece
+            piece_hash = piece.sha1_hash
+            # get actual sha1 hash of piece
+            piece_data = piece.get_data()
+            actual_piece_data_hash = hashlib.sha1(piece_data)
+            if piece_hash.hex() != actual_piece_data_hash.hexdigest():
+                log(f"Piece {piece.index} hash mismatch")
+            return True
+        else:
+            return False
 
     def is_expired(self, pending_request: tuple[float, Block]) -> bool:
         start_time_ns, _ = pending_request
@@ -128,6 +242,7 @@ class PieceManager:
         max_pending_time_ms: int = DEFAULT_MAX_PENDING_TIME_MS,
         piece_indices: tuple[int, ...] | None = None,
         piece_download_strategy: PieceDownloadStrategy | None = None,
+        progress_bar_header_title: str = "Downloading",
     ):
         self.torrent_file = torrent_file
         self.piece_indices = piece_indices
@@ -141,8 +256,27 @@ class PieceManager:
             piece_download_strategy
             or RarestPieceStrategy(self.pieces, self.pending_block_requests)
         )
-        self.progress_manager = ProgressManager(torrent_file.info)
-        self.future = asyncio.ensure_future(self.save_block())
+        self.start_time: Optional[float] = None
+        self.files: tuple[File, ...] = tuple(
+            map(
+                lambda file_info: File(
+                    file_path=file_info["path"], file_size=file_info["length"]
+                ),
+                torrent_file.info.get_files(),
+            )
+        )
+        self.header_print_state: tuple[int, int, int] = (
+            0,
+            MAX_NUMBER_CHARACTERS_HEADER_PROGRESS_BAR,
+            0,
+        )
+        self.progress_bar_header_title = progress_bar_header_title
+        self.downloading_files = self.files
+        self.download_speed = 0
+        self.abort = False
+        self.prev_size_and_timestamp: tuple[float, float] = (0, 0)
+        self.received_pieces: asyncio.Queue[Piece] = asyncio.Queue()
+        self.future = asyncio.ensure_future(self.start())
 
     def get_next_block_to_request(self, peer: Peer):
         return self.piece_download_strategy.get_next_block_to_request(peer)
@@ -161,7 +295,7 @@ class PieceManager:
                     for block_index in range(num_blocks_in_piece)
                 ]
             else:
-                last_length = info.length % info.piece_length
+                last_length = info.get_total_size % info.piece_length
                 num_blocks_in_piece = ceil(last_length / BLOCK_LENGTH)
                 blocks = [
                     Block(piece_index, block_index * BLOCK_LENGTH, BLOCK_LENGTH)
@@ -196,43 +330,149 @@ class PieceManager:
     def bytes_uploaded(self) -> int:
         return 0
 
-    def block_received(self, peer: Peer, piece_message: PiecePeerMessage) -> None:
+    async def block_received(self, peer: Peer, piece_message: PiecePeerMessage) -> None:
         # remove from pending requests queue
         block = self.pieces[piece_message.index][piece_message.begin // BLOCK_LENGTH]
-        self.pending_block_requests.on_block_received(peer, piece_message, block)
+
+        piece = self.pieces[piece_message.index]
+
+        log(
+            f"[{piece_message.index + 1}/{len(self.pieces)}]:"
+            f"[{(piece_message.begin // BLOCK_LENGTH) + 1}/{len(piece)}]"
+        )
+
+        piece_completed = await self.pending_block_requests.on_block_received(
+            peer, piece_message, block, self.pieces[piece_message.index]
+        )
+        if piece_completed:
+            await self.update_correct_file(piece)
 
     def get_peers(self):
         return self.pieces.get_peers()
 
-    async def save_block(self):
-        # async with tqdm(total=self.torrent_file.info.length) as t:
-        while not self.abort:
-            (
-                peer,
-                piece_message,
-            ) = await self.pending_block_requests.received_blocks_queue.get()
-            log(
-                f"[{piece_message.index + 1}/{len(self.pieces)}]:"
-                f"[{(piece_message.begin // BLOCK_LENGTH) + 1}/{len(self.pieces[piece_message.index])}]"
+    @staticmethod
+    def delete_ascii_terminal_line(text_io: TextIO = sys.stdout):
+        text_io.write(ANSI_ERASE_CURRENT_LINE + "\r" + ANSI_MOVE_CURSOR_UP_ONE_LINE)
+
+    def update_header_print_state(self):
+        n_jobs_completed = quantify(self.files, lambda p: p.is_completed)
+        n_filled = ceil(
+            n_jobs_completed
+            / len(self.files)
+            * MAX_NUMBER_CHARACTERS_HEADER_PROGRESS_BAR
+        )
+        n_left = MAX_NUMBER_CHARACTERS_HEADER_PROGRESS_BAR - n_filled
+        self.header_print_state = (n_filled, n_left, n_jobs_completed)
+
+    def update_download_speed(self):
+        size, timestamp = self.prev_size_and_timestamp
+        current_size, current_timestamp = (
+            sum(progress_item.downloaded_size for progress_item in self.files),
+            time.monotonic(),
+        )
+        self.download_speed = (current_size - size) / (current_timestamp - timestamp)
+        self.prev_size_and_timestamp = (current_size, current_timestamp)
+
+    def downloaded_size(self):
+        return sum(downloading_file.downloaded_size for downloading_file in self.files)
+
+    def total_size(self):
+        return sum(downloading_file.file_size for downloading_file in self.files)
+
+    def pretty_print_progress_bar_header(self, text_io: TextIO):
+        n_filled, n_left, n_jobs_completed = self.header_print_state
+        text_io.write(
+            f"\r{INDENT}{get_green_bold_colored(self.progress_bar_header_title)}  "
+            f'[{"=" * (n_filled - 1) + ">"}{" " * n_left}] '
+            f"[{self.downloaded_size()} / {self.total_size()} downloaded] ... "
+            f"{format_timespan(time.monotonic() - self.start_time, detailed=False)}    "
+            f"({format_size(self.download_speed)} / sec)\n"
+        )
+
+    def initialize_all_progress_items(self):
+        for progress_item in self.files:
+            progress_item.start_progress()
+
+    def cleanup_all_progress_items(self):
+        for progress_item in self.files:
+            if not progress_item.is_completed:
+                raise RuntimeError(f"{progress_item} is not completed")
+        for progress_item in self.files:
+            progress_item.cleanup()
+
+    def cleanup(self):
+        self.abort = True
+        if self.future:
+            self.future.cancel()
+
+    async def pretty_print_all_progress_items(
+        self,
+        text_io: TextIO = sys.stdout,
+    ):
+        progress_items = tuple(
+            sorted(
+                self.downloading_files,
+                key=lambda p: p.get_normalized_progress(),
+                reverse=True,
             )
-            # await t.update(piece_message.block_length())
+        )
+        for progress_item in progress_items:
+            progress_item.pretty_print_progress()
+        await asyncio.sleep(FRAMES_PER_CYCLE)
+        for _ in range(len(progress_items)):
+            self.delete_ascii_terminal_line()
+        text_io.write("\r")
+        text_io.write(ANSI_ERASE_CURRENT_LINE)
 
-            # update piece
-            piece = self.pieces[piece_message.index]
-            piece[piece_message.begin // BLOCK_LENGTH].state = BlockState.RECEIVED
-            piece[piece_message.begin // BLOCK_LENGTH].data = piece_message.block
+    def get_incomplete_progress_items_state(
+        self,
+    ) -> tuple[tuple[File, ...], float]:
+        return (
+            tuple(filter(lambda p: p.is_not_completed, self.downloading_files)),
+            time.monotonic(),
+        )
 
-            if piece.is_complete():
-                log(f"Piece {piece.index + 1} completed")
-                # get expected sha1 hash of piece
-                piece_hash = self.torrent_file.info.pieces[piece.index]
+    async def update_correct_file(self, piece: Piece):
+        await self.files[0].queue.put(piece)
 
-                # get actual sha1 hash of piece
-                piece_data = piece.get_data()
-                actual_piece_data_hash = hashlib.sha1(piece_data)
-                if piece_hash.hex() != actual_piece_data_hash.hexdigest():
-                    log(f"Piece {piece.index} hash mismatch")
-                self.progress_manager.received_pieces.put_nowait(piece)
+    async def start(self, text_io: TextIO = sys.stdout):
+        self.start_time = time.monotonic()
+        self.prev_size_and_timestamp = (0, self.start_time)
+        self.initialize_all_progress_items()
+
+        (
+            self.downloading_files,
+            incomplete_progress_items_update_time,
+        ) = self.get_incomplete_progress_items_state()
+        while self.downloading_files:
+            text_io.write(ANSI_HIDE_CURSOR)
+
+            while (
+                time.monotonic() - incomplete_progress_items_update_time
+                < COMPLETED_JOBS_REFRESH_TIME
+            ):
+                self.pretty_print_progress_bar_header(text_io)
+                await self.pretty_print_all_progress_items(text_io)
+                self.delete_ascii_terminal_line()
+                self.update_header_print_state()
+
+            piece = await self.received_pieces.get()
+            await self.update_correct_file(piece)
+            (
+                self.downloading_files,
+                incomplete_progress_items_update_time,
+            ) = self.get_incomplete_progress_items_state()
+            self.update_download_speed()
+        text_io.write(ANSI_ERASE_CURRENT_LINE)
+        text_io.write("\r")
+        self.cleanup_all_progress_items()
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        text_io.write(
+            f"Finished successfully\n"
+            f"     Time ─────────────────────── {format_timespan(time.monotonic() - self.start_time)}\n"
+            f"     Peak RAM use ─────────────── {format_size(rusage.ru_maxrss)}\n"
+        )
+        sys.stdout.write(ANSI_SHOW_CURSOR)
 
 
 class PeerConnectionState(IntFlag):
@@ -330,7 +570,7 @@ class PeerConnection:
                         log(f"Peer requested piece {piece_index}")
                     case PiecePeerMessage() as piece_message:
                         self.clear_pending_request()
-                        self.piece_manager.block_received(peer, piece_message)
+                        await self.piece_manager.block_received(peer, piece_message)
                     case Cancel():
                         log(f"Add cancel logic for {message}")
                     case Port():
@@ -407,12 +647,11 @@ class Client:
 
     def get_downloaded_data(self) -> bytes:
         assert self.piece_manager.download_completed()
-        return b"".join(
-            piece.get_data()
-            for piece in sorted(
-                self.piece_manager.completed_pieces, key=lambda piece: piece.index
-            )
-        )
+        _bytes = []
+        for _file in self.piece_manager.files:
+            for _piece in _file.downloaded:
+                _bytes.append(_piece.get_data())
+        return b"".join(_bytes)
 
     async def start(self, piece_indices: tuple[int, ...] = None):
         self.piece_manager = PieceManager(self.torrent, piece_indices=piece_indices)
@@ -436,7 +675,8 @@ class Client:
 
             current = time.monotonic()
             if (not previous) or (previous + interval < current):
-                response = await self.torrent.discover_peers(
+                response = await discover_peers(
+                    self.torrent,
                     first=previous if previous else False,
                     uploaded=self.piece_manager.bytes_uploaded,
                     downloaded=self.piece_manager.bytes_downloaded,
@@ -456,3 +696,16 @@ class Client:
     def _empty_queue(self):
         while not self.available_peers.empty():
             self.available_peers.get_nowait()
+
+
+def signal_handler(signum, frame):
+    sys.stdout.write(ANSI_SHOW_CURSOR)
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+
+if __name__ == "__main__":
+    import doctest
+
+    doctest.testmod()

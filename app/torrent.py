@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from ipaddress import IPv4Address, IPv6Address, ip_address
-from typing import TypedDict, Literal, NotRequired, ClassVar
-from urllib.parse import urlencode
+from functools import cached_property
+from ipaddress import IPv4Address, IPv6Address
+from pathlib import Path
+from typing import TypedDict, Literal, NotRequired, ClassVar, Required
 
-import aiohttp
 from more_itertools import chunked
 
 from app.bencode import BEncodedDictionary, bencode_encode, bencode_decode
-from app.constants import PEER_ID, SHA1_HASH_LENGTH
+from app.constants import SHA1_HASH_LENGTH
 
 
 @dataclass(slots=True, frozen=True)
@@ -110,15 +111,16 @@ class TrackerGetRequestParams(TypedDict):
     event: NotRequired[Literal["started", "completed", "stopped"]]
 
 
-@dataclass(slots=True)
-class Info:
-    # size of the file in bytes, for single-file torrents
-    length: int
+class FileInfo(TypedDict):
+    # length of the file in bytes (integer)
+    length: Required[int]
 
-    # The name key maps to a UTF-8 encoded string which is the suggested name
-    # to save the file (or directory) as. It is purely advisory.
-    name: str
+    # the path to store the file in
+    path: Required[Path]
 
+
+@dataclass(slots=True, frozen=True)
+class Info(ABC):
     # piece length maps to the number of bytes in each piece the file is split into.
     # For the purposes of transfer, files are split into fixed-size pieces which are all the same length
     # except for possibly the last one which may be truncated.
@@ -127,7 +129,7 @@ class Info:
     piece_length: int
 
     # sha1 hashes of each piece
-    pieces: []
+    pieces: list[object]
 
     # The original dictionary, for debugging and idempotency purposes.
     # This implementation does not implement key ordering checks yet.
@@ -137,6 +139,59 @@ class Info:
     def compute_info_hash(self):
         info_bytes = bencode_encode(self.dict_)
         return hashlib.sha1(info_bytes)
+
+    @abstractmethod
+    def get_directory(self) -> Path:
+        raise NotImplemented
+
+    @abstractmethod
+    def get_files(self) -> tuple[FileInfo, ...]:
+        raise NotImplemented
+
+    @abstractmethod
+    @cached_property
+    def get_total_size(self) -> int:
+        raise NotImplemented
+
+
+@dataclass(frozen=True)
+class SingleFileInfo(Info):
+    # The name key maps to a UTF-8 encoded string which is the suggested name
+    # to save the file (or directory) as. It is purely advisory.
+    name: str
+
+    # size of the file in bytes, for single-file torrents
+    length: int
+
+    def get_directory(self):
+        return Path(self.name)
+
+    def get_files(self):
+        return (FileInfo(length=self.length, path=Path(self.name)),)
+
+    @cached_property
+    def get_total_size(self) -> int:
+        return self.length
+
+
+@dataclass(frozen=True)
+class MultiFileInfo(Info):
+    # the name of the directory in which to store all the files.
+    # This is purely advisory. (string)
+    name: str
+
+    # files
+    files: list[FileInfo]
+
+    def get_directory(self):
+        return Path(self.name)
+
+    def get_files(self):
+        return self.files
+
+    @cached_property
+    def get_total_size(self) -> int:
+        return sum(file_info["length"] for file_info in self.files)
 
 
 @dataclass(slots=True)
@@ -151,42 +206,73 @@ class Torrent:
     @staticmethod
     def from_file_content(torrent_file_content: bytes) -> Torrent:
         metainfo_dict: BEncodedDictionary = bencode_decode(torrent_file_content)
-        (
-            announce,
-            name,
-            piece_length,
-            length,
-            pieces_str,
-        ) = Torrent._extract_info_dict_values(metainfo_dict)
 
-        Torrent._validate_info_dict_values(
-            announce, name, piece_length, length, pieces_str
-        )
+        announce = metainfo_dict["announce"]
+        info = metainfo_dict["info"]
+        name = info["name"]
+        piece_length = info["piece length"]
+        pieces_str = info["pieces"]
 
+        if not isinstance(announce, bytes):
+            raise ValueError("announce must be a byte string")
+        if not isinstance(name, bytes):
+            raise ValueError("name must be a byte string")
+        if not isinstance(piece_length, int) or piece_length <= 0:
+            raise ValueError("piece length must be a positive integer")
+        if not isinstance(pieces_str, bytes) or len(pieces_str) % SHA1_HASH_LENGTH != 0:
+            raise ValueError(
+                f"pieces must be a byte string with length divisible by {SHA1_HASH_LENGTH}"
+            )
         pieces = [bytes(piece) for piece in chunked(pieces_str, SHA1_HASH_LENGTH)]
-
-        info = Info(
-            name=name.decode(),
-            length=length,
-            piece_length=piece_length,
-            pieces=pieces,
-            dict_=metainfo_dict["info"],
-        )
-        return Torrent(
-            announce=announce.decode(),
-            info=info,
-            dict_=metainfo_dict,
-        )
+        if "length" in info:
+            length = info["length"]
+            if not isinstance(length, int) or length <= 0:
+                raise ValueError("length must be a positive integer")
+            info = SingleFileInfo(
+                name=name.decode(),
+                length=length,
+                piece_length=piece_length,
+                pieces=pieces,
+                dict_=metainfo_dict["info"],
+            )
+            return Torrent(
+                announce=announce.decode(),
+                info=info,
+                dict_=metainfo_dict,
+            )
+        else:
+            if "files" not in info:
+                raise ValueError("expected to find either `length` or `files`")
+            files = []
+            for file_info in info["files"]:
+                length = file_info["length"]
+                if not isinstance(length, int) or length <= 0:
+                    raise ValueError("length must be a positive integer")
+                path = Path(
+                    *[path_component.decode() for path_component in file_info["path"]]
+                )
+                files.append(FileInfo(length=length, path=path))
+            return Torrent(
+                announce=announce.decode(),
+                info=MultiFileInfo(
+                    name=name.decode(),
+                    files=files,
+                    piece_length=piece_length,
+                    pieces=pieces,
+                    dict_=metainfo_dict["info"],
+                ),
+                dict_=metainfo_dict,
+            )
 
     @staticmethod
-    def _extract_info_dict_values(metainfo_dict):
-        return (
-            metainfo_dict["announce"],
-            metainfo_dict["info"]["name"],
-            metainfo_dict["info"]["piece length"],
-            metainfo_dict["info"]["length"],
-            metainfo_dict["info"]["pieces"],
-        )
+    def _extract_and_validate_info_dict_values(metainfo_dict: BEncodedDictionary):
+        info = metainfo_dict["info"]
+        if "length" in info:
+            return {**info, **metainfo_dict["announce"]}
+        else:
+            if "files" not in info:
+                raise ValueError("expected to find either `length` or `files`")
+            return {**info, **metainfo_dict["announce"]}
 
     @staticmethod
     def _validate_info_dict_values(announce, name, piece_length, length, pieces_str):
@@ -202,80 +288,3 @@ class Torrent:
             raise ValueError(
                 f"pieces must be a byte string with length divisible by {SHA1_HASH_LENGTH}"
             )
-
-    def _create_tracker_request_params(
-        self, first: bool = False, uploaded: int = 0, downloaded: int = 0
-    ) -> TrackerGetRequestParams:
-        """
-        Creates the request parameters for a GET request to the tracker.
-
-        :param first: True if this is our first request to the tracker
-        :param uploaded: The number of bytes uploaded so far
-        :param downloaded: The number of bytes downloaded so far
-        :return:
-        """
-        req_params = {
-            "info_hash": self.info.compute_info_hash().digest(),
-            "peer_id": PEER_ID,
-            "port": 6881,
-            "uploaded": uploaded,
-            "downloaded": downloaded,
-            "left": self.info.length,
-            "compact": 1,
-        }
-        if first:
-            req_params["event"] = "started"
-        return req_params
-
-    async def discover_peers(
-        self, first: bool = False, uploaded: int = 0, downloaded: int = 0
-    ) -> TrackerGetResponse:
-        """
-        Asynchronously sends a that sends a GET request to the tracker to discover peers.
-
-        :param first: True if this is our first request to the tracker
-        :param uploaded: The number of bytes uploaded so far
-        :param downloaded: The number of bytes downloaded so far
-        :return: TrackerGetResponse
-
-        """
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                self.announce
-                + "?"
-                + urlencode(
-                    self._create_tracker_request_params(first, uploaded, downloaded)
-                )
-            ) as tracker_response:
-                if tracker_response.status != 200:
-                    raise ConnectionError(
-                        f"Tracker returned status code {tracker_response.status}"
-                    )
-                tracker_content = await tracker_response.read()
-                tracker_info = bencode_decode(tracker_content)
-                if "failure reason" in tracker_info:
-                    raise ValueError(
-                        f'Failure reason: {tracker_info["failure reason"].decode()}'
-                    )
-                return TrackerGetResponse(
-                    interval=tracker_info["interval"],
-                    complete=tracker_info["complete"],
-                    incomplete=tracker_info["incomplete"],
-                    peers=[
-                        Peer(
-                            ip=ip_address(peer_info[: Peer.NUM_BYTES_IN_IP]),
-                            port=int.from_bytes(
-                                peer_info[Peer.NUM_BYTES_IN_IP :], "big", signed=False
-                            ),
-                        )
-                        for peer_info in map(
-                            bytes,
-                            chunked(
-                                tracker_info["peers"],
-                                Peer.NUM_BYTES_IN_PEER,
-                                strict=True,  # we want to raise an error if the last chunk is not the right size
-                            ),
-                        )
-                    ],
-                    dict_=tracker_info,
-                )
