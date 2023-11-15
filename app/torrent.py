@@ -129,7 +129,7 @@ class Info(ABC):
     piece_length: int
 
     # sha1 hashes of each piece
-    pieces: list[object]
+    pieces: list[bytes]
 
     # The original dictionary, for debugging and idempotency purposes.
     # This implementation does not implement key ordering checks yet.

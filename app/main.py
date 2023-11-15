@@ -34,7 +34,7 @@ async def async_download_piece(
 ) -> None:
     """Download a piece of the file"""
     client = Client(file_content=file_content)
-    await client.start((piece_index,))
+    await client.start(desired_piece_indices=(piece_index,))
     output_file.write(client.piece_manager.pieces[piece_index].get_data())
 
 

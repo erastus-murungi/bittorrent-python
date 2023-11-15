@@ -26,7 +26,14 @@ from app.constants import (
     HANDSHAKE_BUFFER_SIZE,
     DEFAULT_SLEEP_SECONDS_BEFORE_CALLING_TRACKER,
 )
-from app.content import Block, Piece, PiecesRegistry, BlockState, DensePiecesRegistry
+from app.content import (
+    Block,
+    Piece,
+    PiecesRegistry,
+    DensePiecesRegistry,
+    BlockState,
+    SparsePiecesRegistry,
+)
 from app.messages import (
     Interested,
     Choke,
@@ -171,6 +178,7 @@ class PendingRequestsRegistry(defaultdict[Peer, Heap[Block]]):
             return False
 
     def is_expired(self, pending_request: tuple[float, Block]) -> bool:
+        # TODO: take the peer who did this to the back of the line
         start_time_ns, _ = pending_request
         return start_time_ns + self.max_pending_time_ns < time.monotonic_ns()
 
@@ -237,6 +245,7 @@ class PieceManager:
     def __init__(
         self,
         torrent_file: Torrent,
+        pieces_registry: PiecesRegistry,
         *,
         max_pending_time_ms: int = DEFAULT_MAX_PENDING_TIME_MS,
         piece_download_strategy: PieceDownloadStrategy | None = None,
@@ -249,7 +258,7 @@ class PieceManager:
             max_pending_time_ms * 1_000_000
         )
         self.completed_pieces: list[Piece] = []
-        self.pieces: PiecesRegistry = self._init_pieces()
+        self.pieces: PiecesRegistry = pieces_registry
         self.piece_download_strategy: PieceDownloadStrategy = (
             piece_download_strategy
             or RarestPieceStrategy(self.pieces, self.pending_block_requests)
@@ -280,34 +289,6 @@ class PieceManager:
     def close(self):
         self.abort = True
 
-    def _init_pieces(self) -> PiecesRegistry:
-        info = self.torrent_file.info
-        pieces = DensePiecesRegistry()
-        num_blocks_in_piece = ceil(info.piece_length / BLOCK_LENGTH)
-        for piece_index, sha1_hash in enumerate(info.pieces):
-            if piece_index < len(info.pieces) - 1:
-                blocks = [
-                    Block(piece_index, block_index * BLOCK_LENGTH, BLOCK_LENGTH)
-                    for block_index in range(num_blocks_in_piece)
-                ]
-            else:
-                last_length = info.get_total_size % info.piece_length
-                num_blocks_in_piece = ceil(last_length / BLOCK_LENGTH)
-                blocks = [
-                    Block(piece_index, block_index * BLOCK_LENGTH, BLOCK_LENGTH)
-                    for block_index in range(num_blocks_in_piece)
-                ]
-                if last_length % BLOCK_LENGTH != 0:
-                    blocks[-1].length = last_length % BLOCK_LENGTH
-            pieces.append(Piece(piece_index, info.piece_length, blocks, sha1_hash))
-        return pieces
-
-    def update_pieces_from_peer(self, peer: Peer, bitfield: bytes) -> None:
-        self.pieces.update_pieces_from_peer(peer, bitfield)
-
-    def add_piece_index_for_peer(self, peer: Peer, piece_index: int) -> None:
-        self.pieces.add_piece_index_for_peer(peer, piece_index)
-
     def download_completed(self) -> bool:
         return all(piece.is_complete() for piece in self.pieces)
 
@@ -320,10 +301,7 @@ class PieceManager:
         piece = self.pieces[piece_message.index]
         block = piece[piece_message.begin // BLOCK_LENGTH]
 
-        log(
-            f"[{piece_message.index + 1}/{len(self.pieces)}]:"
-            f"[{(piece_message.begin // BLOCK_LENGTH) + 1}/{len(piece)}]"
-        )
+        log(f"Received block {block} from peer {peer}")
 
         piece_completed = await self.pending_block_requests.on_block_received(
             peer, piece_message, block, piece
@@ -372,11 +350,13 @@ class PieceManager:
             progress_item.start_progress()
 
     def cleanup_all_progress_items(self):
-        for progress_item in self.files:
-            if not progress_item.is_completed:
-                raise RuntimeError(f"{progress_item} is not completed")
-        for progress_item in self.files:
-            progress_item.cleanup()
+        for file in self.files:
+            if isinstance(self.pieces, SparsePiecesRegistry):
+                continue
+            else:
+                if file.is_not_completed:
+                    log(f"Deleting file {file.file_path}")
+                file.cleanup()
 
     def cleanup(self):
         self.abort = True
@@ -421,7 +401,8 @@ class PieceManager:
             self.downloading_files,
             incomplete_progress_items_update_time,
         ) = self.get_incomplete_progress_items_state()
-        while self.downloading_files:
+        while not self.download_completed():
+            log("stuck here")
             text_io.write(ANSI_HIDE_CURSOR)
 
             while (
@@ -439,16 +420,6 @@ class PieceManager:
                 self.downloading_files,
                 incomplete_progress_items_update_time,
             ) = self.get_incomplete_progress_items_state()
-        text_io.write(ANSI_ERASE_CURRENT_LINE)
-        text_io.write("\r")
-        self.cleanup_all_progress_items()
-        rusage = resource.getrusage(resource.RUSAGE_SELF)
-        text_io.write(
-            f"Finished successfully\n"
-            f"     Time ─────────────────────── {format_timespan(time.monotonic() - self.start_time)}\n"
-            f"     Peak RAM use ─────────────── {format_size(rusage.ru_maxrss)}\n"
-        )
-        sys.stdout.write(ANSI_SHOW_CURSOR)
 
 
 class PeerConnectionState(IntFlag):
@@ -458,6 +429,9 @@ class PeerConnectionState(IntFlag):
     STOPPED = 0b1000
     PENDING_REQUEST = 0b10000
     INITIALIZED = 0b100000
+
+
+PENDING_REQUEST_TIMEOUT = 10  # a block request will timeout after 10 seconds
 
 
 class PeerConnection:
@@ -539,9 +513,13 @@ class PeerConnection:
                         log("Peer is not interested")
                     case Have(piece_index=piece_index):
                         log(f"Peer has piece {piece_index}")
-                        self.piece_manager.add_piece_index_for_peer(peer, piece_index)
+                        self.piece_manager.pieces.add_piece_index_for_peer(
+                            peer, piece_index
+                        )
                     case BitField(bitfield=bitfield):
-                        self.piece_manager.update_pieces_from_peer(peer, bitfield)
+                        self.piece_manager.pieces.update_pieces_from_peer(
+                            peer, bitfield
+                        )
                     case Request(index=piece_index):
                         log(f"Peer requested piece {piece_index}")
                     case PiecePeerMessage() as piece_message:
@@ -571,6 +549,7 @@ class PeerConnection:
     async def _request_piece(self, peer: Peer, writer: StreamWriter):
         next_block = self.piece_manager.get_next_block_to_request(peer)
         if next_block:
+            log(f"Requesting block {next_block} from peer {peer}")
             next_block.state = BlockState.PENDING
             message = Request(
                 index=next_block.index,
@@ -629,8 +608,20 @@ class Client:
                 _bytes.append(_piece.get_data())
         return b"".join(_bytes)
 
-    async def start(self, text_io: TextIO = sys.stdout):
-        self.piece_manager = PieceManager(self.torrent, text_io=text_io)
+    async def start(
+        self,
+        *,
+        text_io: TextIO = sys.stdout,
+        desired_piece_indices: tuple[int, ...] | None = None,
+    ):
+        pieces_registry = (
+            SparsePiecesRegistry.from_info(self.torrent.info, desired_piece_indices)
+            if desired_piece_indices
+            else DensePiecesRegistry.from_info(self.torrent.info)
+        )
+        self.piece_manager = PieceManager(
+            self.torrent, text_io=text_io, pieces_registry=pieces_registry
+        )
         self.peer_connections = [
             PeerConnection(self.torrent, self.available_peers, self.piece_manager)
             for _ in range(self.max_peer_connections)
@@ -639,9 +630,9 @@ class Client:
         # The time we last made an announce call (timestamp)
         previous = None
         # Default interval between announce calls (in seconds)
-        interval = 30 * 60
-
+        interval = DEFAULT_SLEEP_SECONDS_BEFORE_CALLING_TRACKER
         while True:
+            log(f"Downloaded {self.piece_manager.download_completed()}")
             if self.piece_manager.download_completed():
                 text_io.write(ANSI_ERASE_CURRENT_LINE)
                 text_io.write("\r")
@@ -675,7 +666,9 @@ class Client:
                         log(f"Adding peer {peer} to queue")
                         self.available_peers.put_nowait(peer)
             else:
-                await asyncio.sleep(DEFAULT_SLEEP_SECONDS_BEFORE_CALLING_TRACKER)
+                if not self.piece_manager.download_completed():
+                    await asyncio.sleep(2)
+
         self.stop()
 
     def _empty_queue(self):
