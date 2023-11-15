@@ -26,7 +26,7 @@ from app.constants import (
     HANDSHAKE_BUFFER_SIZE,
     DEFAULT_SLEEP_SECONDS_BEFORE_CALLING_TRACKER,
 )
-from app.content import Block, Piece, PiecesRegistry, BlockState
+from app.content import Block, Piece, PiecesRegistry, BlockState, DensePiecesRegistry
 from app.messages import (
     Interested,
     Choke,
@@ -239,13 +239,11 @@ class PieceManager:
         torrent_file: Torrent,
         *,
         max_pending_time_ms: int = DEFAULT_MAX_PENDING_TIME_MS,
-        piece_indices: tuple[int, ...] | None = None,
         piece_download_strategy: PieceDownloadStrategy | None = None,
         progress_bar_header_title: str = "Downloading",
         text_io: TextIO = sys.stdout,
     ):
         self.torrent_file = torrent_file
-        self.piece_indices = piece_indices
         self.abort = False
         self.pending_block_requests: PendingRequestsRegistry = PendingRequestsRegistry(
             max_pending_time_ms * 1_000_000
@@ -284,7 +282,7 @@ class PieceManager:
 
     def _init_pieces(self) -> PiecesRegistry:
         info = self.torrent_file.info
-        pieces = PiecesRegistry()
+        pieces = DensePiecesRegistry()
         num_blocks_in_piece = ceil(info.piece_length / BLOCK_LENGTH)
         for piece_index, sha1_hash in enumerate(info.pieces):
             if piece_index < len(info.pieces) - 1:
@@ -302,13 +300,6 @@ class PieceManager:
                 if last_length % BLOCK_LENGTH != 0:
                     blocks[-1].length = last_length % BLOCK_LENGTH
             pieces.append(Piece(piece_index, info.piece_length, blocks, sha1_hash))
-        if self.piece_indices:
-            for piece_index, piece in enumerate(pieces):
-                if piece_index not in self.piece_indices:
-                    for block in piece:
-                        block.state = BlockState.RECEIVED
-                if piece.is_complete():
-                    self.completed_pieces.append(piece)
         return pieces
 
     def update_pieces_from_peer(self, peer: Peer, bitfield: bytes) -> None:
@@ -638,12 +629,8 @@ class Client:
                 _bytes.append(_piece.get_data())
         return b"".join(_bytes)
 
-    async def start(
-        self, piece_indices: tuple[int, ...] = None, text_io: TextIO = sys.stdout
-    ):
-        self.piece_manager = PieceManager(
-            self.torrent, piece_indices=piece_indices, text_io=text_io
-        )
+    async def start(self, text_io: TextIO = sys.stdout):
+        self.piece_manager = PieceManager(self.torrent, text_io=text_io)
         self.peer_connections = [
             PeerConnection(self.torrent, self.available_peers, self.piece_manager)
             for _ in range(self.max_peer_connections)
@@ -690,7 +677,6 @@ class Client:
             else:
                 await asyncio.sleep(DEFAULT_SLEEP_SECONDS_BEFORE_CALLING_TRACKER)
         self.stop()
-        return self.piece_manager.completed_pieces
 
     def _empty_queue(self):
         while not self.available_peers.empty():

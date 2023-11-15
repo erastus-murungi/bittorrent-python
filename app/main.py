@@ -45,7 +45,6 @@ async def async_download_full_file(
     client = Client(file_content=file_content)
     await client.start()
     output_file.write(client.get_downloaded_data())
-    print(f"Downloaded {client.torrent.info.name} to {output_file.name}")
 
 
 async def async_main(

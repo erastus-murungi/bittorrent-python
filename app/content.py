@@ -1,7 +1,8 @@
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional
+from typing import Optional, Iterable
 
 from app.torrent import Peer
 
@@ -59,14 +60,44 @@ class Piece(list[Block]):
         return self.index == other.index
 
 
-class PiecesRegistry(list[Piece]):
+class PiecesRegistry(ABC, Iterable[Piece]):
+    @abstractmethod
+    def get_peers(self) -> set[Peer]:
+        pass
+
+    @abstractmethod
+    def update_pieces_from_peer(self, peer: Peer, bitfield: bytes) -> None:
+        pass
+
+    @abstractmethod
+    def add_piece_index_for_peer(self, peer: Peer, piece_index: int) -> None:
+        pass
+
+    @abstractmethod
+    def contains_peer(self, peer: Peer) -> bool:
+        pass
+
+    @abstractmethod
+    def get_by_peer(self, peer: Peer) -> set[Piece]:
+        pass
+
+    @abstractmethod
+    def get_peers_with_piece(self, piece: Piece) -> set[Peer]:
+        pass
+
+    @abstractmethod
+    def pieces(self):
+        pass
+
+
+class DensePiecesRegistry(list[Piece], PiecesRegistry):
     def __init__(self):
         super().__init__()
         self._peer2pieces: dict[Peer, set[Piece]] = defaultdict(set)
         self._piece2peers: dict[Piece, set[Peer]] = defaultdict(set)
 
-    def get_peers(self):
-        return self._peer2pieces.keys()
+    def get_peers(self) -> set[Peer]:
+        return set(self._peer2pieces.keys())
 
     def update_pieces_from_peer(self, peer: Peer, bitfield: bytes) -> None:
         pieces_available = set()
@@ -91,3 +122,7 @@ class PiecesRegistry(list[Piece]):
 
     def get_peers_with_piece(self, piece: Piece) -> set[Peer]:
         return self._piece2peers[piece]
+
+    @property
+    def pieces(self):
+        return list(self)
