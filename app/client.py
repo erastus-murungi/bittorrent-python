@@ -242,6 +242,7 @@ class PieceManager:
         piece_indices: tuple[int, ...] | None = None,
         piece_download_strategy: PieceDownloadStrategy | None = None,
         progress_bar_header_title: str = "Downloading",
+        text_io: TextIO = sys.stdout,
     ):
         self.torrent_file = torrent_file
         self.piece_indices = piece_indices
@@ -271,11 +272,9 @@ class PieceManager:
         )
         self.progress_bar_header_title = progress_bar_header_title
         self.downloading_files = self.files
-        self.download_speed = 0
         self.abort = False
-        self.prev_size_and_timestamp: tuple[float, float] = (0, 0)
         self.received_pieces: asyncio.Queue[Piece] = asyncio.Queue()
-        self.future = asyncio.ensure_future(self.start())
+        self.future = asyncio.ensure_future(self.start(text_io))
 
     def get_next_block_to_request(self, peer: Peer):
         return self.piece_download_strategy.get_next_block_to_request(peer)
@@ -322,10 +321,6 @@ class PieceManager:
         return all(piece.is_complete() for piece in self.pieces)
 
     @property
-    def bytes_downloaded(self) -> int:
-        return sum(piece.length for piece in self.pieces if piece.is_complete())
-
-    @property
     def bytes_uploaded(self) -> int:
         return 0
 
@@ -362,14 +357,8 @@ class PieceManager:
         n_left = MAX_NUMBER_CHARACTERS_HEADER_PROGRESS_BAR - n_filled
         self.header_print_state = (n_filled, n_left, n_jobs_completed)
 
-    def update_download_speed(self):
-        size, timestamp = self.prev_size_and_timestamp
-        current_size, current_timestamp = (
-            sum(progress_item.downloaded_size for progress_item in self.files),
-            time.monotonic(),
-        )
-        self.download_speed = (current_size - size) / (current_timestamp - timestamp)
-        self.prev_size_and_timestamp = (current_size, current_timestamp)
+    def downloading_speed(self):
+        return self.downloaded_size() / (time.monotonic() - self.start_time)
 
     def downloaded_size(self):
         return sum(downloading_file.downloaded_size for downloading_file in self.files)
@@ -383,8 +372,8 @@ class PieceManager:
             f"\r{INDENT}{get_green_bold_colored(self.progress_bar_header_title)}  "
             f'[{"=" * (n_filled - 1) + ">"}{" " * n_left}] '
             f"[{self.downloaded_size()} / {self.total_size()} downloaded] ... "
-            f"{format_timespan(time.monotonic() - self.start_time, detailed=False)}    "
-            f"({format_size(self.download_speed)} / sec)\n"
+            f"{format_timespan(time.monotonic() - self.start_time, detailed=False)} "
+            f"[{format_size(self.downloading_speed())} / sec]\n"
         )
 
     def initialize_all_progress_items(self):
@@ -433,9 +422,8 @@ class PieceManager:
     async def update_correct_file(self, piece: Piece):
         await self.files[0].queue.put(piece)
 
-    async def start(self, text_io: TextIO = sys.stdout):
+    async def start(self, text_io: TextIO):
         self.start_time = time.monotonic()
-        self.prev_size_and_timestamp = (0, self.start_time)
         self.initialize_all_progress_items()
 
         (
@@ -460,7 +448,6 @@ class PieceManager:
                 self.downloading_files,
                 incomplete_progress_items_update_time,
             ) = self.get_incomplete_progress_items_state()
-            self.update_download_speed()
         text_io.write(ANSI_ERASE_CURRENT_LINE)
         text_io.write("\r")
         self.cleanup_all_progress_items()
@@ -651,8 +638,12 @@ class Client:
                 _bytes.append(_piece.get_data())
         return b"".join(_bytes)
 
-    async def start(self, piece_indices: tuple[int, ...] = None):
-        self.piece_manager = PieceManager(self.torrent, piece_indices=piece_indices)
+    async def start(
+        self, piece_indices: tuple[int, ...] = None, text_io: TextIO = sys.stdout
+    ):
+        self.piece_manager = PieceManager(
+            self.torrent, piece_indices=piece_indices, text_io=text_io
+        )
         self.peer_connections = [
             PeerConnection(self.torrent, self.available_peers, self.piece_manager)
             for _ in range(self.max_peer_connections)
@@ -665,7 +656,17 @@ class Client:
 
         while True:
             if self.piece_manager.download_completed():
-                log(f"{self.torrent.info.name} fully downloaded!")
+                text_io.write(ANSI_ERASE_CURRENT_LINE)
+                text_io.write("\r")
+                self.piece_manager.cleanup_all_progress_items()
+                rusage = resource.getrusage(resource.RUSAGE_SELF)
+                text_io.write(
+                    f"Download to {self.torrent.info.get_directory()} successfully\n"
+                    f"     Time ───────────────────────"
+                    f" {format_timespan(time.monotonic() - self.piece_manager.start_time)}\n"
+                    f"     Peak RAM use ─────────────── {format_size(rusage.ru_maxrss)}\n"
+                )
+                text_io.write(ANSI_SHOW_CURSOR)
                 break
             if self.abort:
                 log("Aborting download...")
@@ -677,7 +678,7 @@ class Client:
                     self.torrent,
                     first=previous if previous else False,
                     uploaded=self.piece_manager.bytes_uploaded,
-                    downloaded=self.piece_manager.bytes_downloaded,
+                    downloaded=self.piece_manager.downloaded_size(),
                 )
 
                 if response:
