@@ -60,6 +60,7 @@ FRAMES_PER_CYCLE = 1.0 / 10.0
 MAX_NUMBER_CHARACTERS_HEADER_PROGRESS_BAR = 30
 
 INDENT = "    "
+DOTS = "...." * 5
 
 
 def get_green_bold_colored(text: str) -> str:
@@ -92,7 +93,8 @@ class File:
         while self.is_not_completed:
             piece = await self.queue.get()
             insort(self.downloaded, piece, key=lambda p: p.index)
-            self.downloaded_size += piece.length
+            self.downloaded_size += len(piece.get_data())
+        self.finish_time = time.monotonic()
 
     def cleanup(self):
         if self.future:
@@ -113,11 +115,8 @@ class File:
         """
         if self.file_size is None:
             return 0.0
-        normalized_progress = len(self.downloaded) / self.file_size
-        if normalized_progress >= 1.0:
-            if self.finish_time is None:
-                self.finish_time = time.monotonic()
-        return min(normalized_progress, 1.0)
+        progress = self.downloaded_size / self.file_size
+        return min(progress, 1.0)
 
     def get_percentage_progress(self) -> float:
         return self.get_normalized_progress() * 100
@@ -129,12 +128,12 @@ class File:
             # we define done_str because f-strings do not allow `\`
             done_str = "\u2714"
             text_io.write(
-                f"{INDENT}{get_green_bold_colored(done_str)} {progress_item_title} ... finished in "
+                f"{INDENT}{get_green_bold_colored(done_str)} {progress_item_title} {DOTS} finished in "
                 f"{format_timespan(self.finish_time - self.start_time)}\n"
             )
         else:
             text_io.write(
-                f"{INDENT}{progress_spinner_code_point} {progress_item_title} ... "
+                f"{INDENT}{progress_spinner_code_point} {progress_item_title} {DOTS} "
                 f"{format_timespan(time.monotonic() - self.start_time)}    ({self.get_percentage_progress():04.2f} %)\n"
             )
 
@@ -332,9 +331,8 @@ class PieceManager:
 
     async def block_received(self, peer: Peer, piece_message: PiecePeerMessage) -> None:
         # remove from pending requests queue
-        block = self.pieces[piece_message.index][piece_message.begin // BLOCK_LENGTH]
-
         piece = self.pieces[piece_message.index]
+        block = piece[piece_message.begin // BLOCK_LENGTH]
 
         log(
             f"[{piece_message.index + 1}/{len(self.pieces)}]:"
@@ -342,7 +340,7 @@ class PieceManager:
         )
 
         piece_completed = await self.pending_block_requests.on_block_received(
-            peer, piece_message, block, self.pieces[piece_message.index]
+            peer, piece_message, block, piece
         )
         if piece_completed:
             await self.update_correct_file(piece)
